@@ -669,28 +669,65 @@ export class Tuner {
         disableMMTSDecoder = disableDecoder,
         recoverUnavailableTuners = false
     ): TunerDevice | null {
+        const localDevices = devices.filter(device => device.isRemote === false);
+        const remoteDevices = devices.filter(device => device.isRemote === true);
+
         // 1. join to existing
-        for (const device of devices) {
+        for (const device of [...localDevices, ...remoteDevices]) {
             if (device.isAvailable === true && device.canReuseStream(channel, disableDecoder, disableMMTSDecoder) === true) {
                 return device;
             }
         }
 
-        // 2. start as new
-        for (const device of devices) {
+        // 2. start as new on local tuners
+        for (const device of localDevices) {
             if (device.isFree === true && device.canStartStream(channel) === true) {
                 return device;
             }
         }
 
-        // 3. replace existing
-        for (const device of devices) {
+        // 3. replace existing on local tuners
+        for (const device of localDevices) {
             if (device.isAvailable === true && device.users.length === 0 && device.canStartStream(channel) === true) {
                 return device;
             }
         }
 
-        // 4. takeover existing
+        // 4. preempt background jobs (EPG / service scan) on local tuners for foreground streams
+        if (priority >= 0) {
+            for (const device of localDevices) {
+                if (device.isUsing === true &&
+                    device.channel !== channel &&
+                    device.getPriority() < priority &&
+                    device.users.every(user => user.priority < 0) === true &&
+                    device.canStartStream(channel) === true
+                ) {
+                    log.info(
+                        "TunerDevice#%d is running a background job for `%s`; preempting it for foreground stream `%s`",
+                        device.index,
+                        device.channel.name,
+                        channel.name
+                    );
+                    return device;
+                }
+            }
+        }
+
+        // 5. start as new on remote tuners
+        for (const device of remoteDevices) {
+            if (device.isFree === true && device.canStartStream(channel) === true) {
+                return device;
+            }
+        }
+
+        // 6. replace existing on remote tuners
+        for (const device of remoteDevices) {
+            if (device.isAvailable === true && device.users.length === 0 && device.canStartStream(channel) === true) {
+                return device;
+            }
+        }
+
+        // 7. takeover existing
         if (priority >= 0) {
             devices.sort((t1, t2) => t1.getPriority() - t2.getPriority());
             for (const device of devices) {
@@ -700,7 +737,7 @@ export class Tuner {
             }
         }
 
-        // 5. recover unavailable tuners
+        // 8. recover unavailable tuners
         // If every tuner for this channel type is unavailable, keep one attempt path open
         // for foreground/external requests instead of letting background failures deadlock the type.
         if (recoverUnavailableTuners === true) {

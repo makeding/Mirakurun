@@ -317,3 +317,124 @@ describe("[tuner-device.spec] local-only channel selection", () => {
         assert.strictEqual(tuner.hasLocalTunerForChannel(channel), false);
     });
 });
+
+describe("[tuner-device.spec] local-first tuner selection", () => {
+    function createPickDevice(options) {
+        return {
+            index: options.index,
+            isRemote: options.isRemote,
+            isAvailable: true,
+            isFree: options.free === true,
+            isUsing: options.using === true,
+            channel: options.using === true ? options.channel : null,
+            users: options.users || [],
+            getPriority: () => (options.users || []).reduce((max, user) => Math.max(max, user.priority), -2),
+            canReuseStream: () => options.canReuse === true,
+            canStartStream: () => true,
+            config: {
+                name: options.name || `tuner-${options.index}`
+            }
+        };
+    }
+
+    it("starts a stream on a free local tuner before a free remote tuner", () => {
+        const tuner = Object.create(Tuner.prototype);
+        const channel = createChannel();
+        const remote = createPickDevice({ index: 0, isRemote: true, free: true });
+        const local = createPickDevice({ index: 1, isRemote: false, free: true });
+
+        const picked = tuner._pickTunerDevice([remote, local], channel, 0);
+
+        assert.strictEqual(picked, local);
+    });
+
+    it("preempts a background EPG job on a local tuner instead of using a free remote tuner", () => {
+        const tuner = Object.create(Tuner.prototype);
+        const channel = createChannel();
+        const epgChannel = createChannel();
+        const localEpg = createPickDevice({
+            index: 0,
+            isRemote: false,
+            using: true,
+            channel: epgChannel,
+            users: [{ id: "Mirakurun:getEPG()", priority: -1 }]
+        });
+        const remote = createPickDevice({ index: 1, isRemote: true, free: true });
+
+        const picked = tuner._pickTunerDevice([remote, localEpg], channel, 0);
+
+        assert.strictEqual(picked, localEpg);
+    });
+
+    it("does not preempt a local tuner serving foreground users", () => {
+        const tuner = Object.create(Tuner.prototype);
+        const channel = createChannel();
+        const otherChannel = createChannel();
+        const localViewer = createPickDevice({
+            index: 0,
+            isRemote: false,
+            using: true,
+            channel: otherChannel,
+            users: [{ id: "client", priority: 0 }]
+        });
+        const remote = createPickDevice({ index: 1, isRemote: true, free: true });
+
+        const picked = tuner._pickTunerDevice([localViewer, remote], channel, 0);
+
+        assert.strictEqual(picked, remote);
+    });
+
+    it("does not preempt local tuners for background jobs", () => {
+        const tuner = Object.create(Tuner.prototype);
+        const channel = createChannel();
+        const otherChannel = createChannel();
+        const localEpg = createPickDevice({
+            index: 0,
+            isRemote: false,
+            using: true,
+            channel: otherChannel,
+            users: [{ id: "Mirakurun:getEPG()", priority: -1 }]
+        });
+        const remote = createPickDevice({ index: 1, isRemote: true, free: true });
+
+        const picked = tuner._pickTunerDevice([localEpg, remote], channel, -1);
+
+        assert.strictEqual(picked, remote);
+    });
+
+    it("joins an existing local stream before preempting anything", () => {
+        const tuner = Object.create(Tuner.prototype);
+        const channel = createChannel();
+        const localEpg = createPickDevice({
+            index: 0,
+            isRemote: false,
+            using: true,
+            channel: channel,
+            canReuse: true,
+            users: [{ id: "Mirakurun:getEPG()", priority: -1 }]
+        });
+        const remote = createPickDevice({ index: 1, isRemote: true, free: true });
+
+        const picked = tuner._pickTunerDevice([remote, localEpg], channel, 0);
+
+        assert.strictEqual(picked, localEpg);
+    });
+
+    it("does not preempt a local tuner running a user-triggered scan", () => {
+        const tuner = Object.create(Tuner.prototype);
+        const channel = createChannel();
+        const otherChannel = createChannel();
+        const localScan = createPickDevice({
+            index: 0,
+            isRemote: false,
+            using: true,
+            channel: otherChannel,
+            users: [{ id: "Mirakurun:API:channelScan", priority: 1 }]
+        });
+        const remote = createPickDevice({ index: 1, isRemote: true, free: true });
+
+        const picked = tuner._pickTunerDevice([localScan, remote], channel, 0);
+
+        assert.strictEqual(picked, remote);
+    });
+});
