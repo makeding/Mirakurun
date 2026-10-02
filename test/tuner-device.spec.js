@@ -4,6 +4,7 @@ const EventEmitter = require("events");
 
 const shared = require("../lib/Mirakurun/_").default;
 const MirakurunEvent = require("../lib/Mirakurun/Event").default;
+const common = require("../lib/Mirakurun/common");
 const ChannelItem = require("../lib/Mirakurun/ChannelItem").default;
 const remoteExitCodes = require("../lib/remoteExitCodes");
 const statusPath = require.resolve("../lib/Mirakurun/status");
@@ -51,6 +52,25 @@ function createStream() {
         }
     };
     return stream;
+}
+
+function createPickDevice(options) {
+    return {
+        index: options.index,
+        isRemote: options.isRemote,
+        isAvailable: true,
+        isFree: options.free === true,
+        isUsing: options.using === true,
+        channel: options.using === true ? options.channel : null,
+        users: options.users || [],
+        getPriority: () => (options.users || []).reduce((max, user) => Math.max(max, user.priority), -2),
+        canReuseStream: () => options.canReuse === true,
+        canStartStream: () => true,
+        config: {
+            name: options.name || `tuner-${options.index}`,
+            types: ["GR-ALT"]
+        }
+    };
 }
 
 function installFakeSpawn(device) {
@@ -319,24 +339,6 @@ describe("[tuner-device.spec] local-only channel selection", () => {
 });
 
 describe("[tuner-device.spec] local-first tuner selection", () => {
-    function createPickDevice(options) {
-        return {
-            index: options.index,
-            isRemote: options.isRemote,
-            isAvailable: true,
-            isFree: options.free === true,
-            isUsing: options.using === true,
-            channel: options.using === true ? options.channel : null,
-            users: options.users || [],
-            getPriority: () => (options.users || []).reduce((max, user) => Math.max(max, user.priority), -2),
-            canReuseStream: () => options.canReuse === true,
-            canStartStream: () => true,
-            config: {
-                name: options.name || `tuner-${options.index}`
-            }
-        };
-    }
-
     it("starts a stream on a free local tuner before a free remote tuner", () => {
         const tuner = Object.create(Tuner.prototype);
         const channel = createChannel();
@@ -360,10 +362,18 @@ describe("[tuner-device.spec] local-first tuner selection", () => {
             users: [{ id: "Mirakurun:getEPG()", priority: -1 }]
         });
         const remote = createPickDevice({ index: 1, isRemote: true, free: true });
+        const runScheduleKeys = [];
+        const originalJob = shared.job;
+        shared.job = { runSchedule: key => runScheduleKeys.push(key) };
 
-        const picked = tuner._pickTunerDevice([remote, localEpg], channel, 0);
+        try {
+            const picked = tuner._pickTunerDevice([remote, localEpg], channel, 0);
+            assert.strictEqual(picked, localEpg);
+        } finally {
+            shared.job = originalJob;
+        }
 
-        assert.strictEqual(picked, localEpg);
+        assert.deepStrictEqual(runScheduleKeys, ["EPG.Gatherer"]);
     });
 
     it("does not preempt a local tuner serving foreground users", () => {
@@ -436,5 +446,85 @@ describe("[tuner-device.spec] local-first tuner selection", () => {
         const picked = tuner._pickTunerDevice([localScan, remote], channel, 0);
 
         assert.strictEqual(picked, remote);
+    });
+});
+
+describe("[tuner-device.spec] background jobs during streaming", () => {
+    it("falls back to a remote tuner when every local tuner is busy streaming", async () => {
+        const tuner = Object.create(Tuner.prototype);
+        tuner._readyForJobPickedDeviceSet = new Set();
+        const channel = createChannel();
+        const otherChannel = createChannel();
+        const localRecording = createPickDevice({
+            index: 0,
+            isRemote: false,
+            using: true,
+            channel: otherChannel,
+            users: [{ id: "client", priority: 0 }]
+        });
+        const remote = createPickDevice({ index: 1, isRemote: true, free: true });
+        tuner._devices = [localRecording, remote];
+
+        const ready = await tuner.readyForJob(channel);
+
+        assert.strictEqual(ready, true);
+        assert.strictEqual(tuner._readyForJobPickedDeviceSet.has(remote), true);
+    });
+
+    it("waits for a held local tuner instead of falling back to a remote tuner", () => {
+        const tuner = Object.create(Tuner.prototype);
+        tuner._readyForJobPickedDeviceSet = new Set();
+        const channel = createChannel();
+        const localHeld = createPickDevice({ index: 0, isRemote: false, free: true });
+        const remote = createPickDevice({ index: 1, isRemote: true, free: true });
+        tuner._devices = [localHeld, remote];
+        tuner._readyForJobPickedDeviceSet.add(localHeld); // another job just picked it
+
+        const originalSleep = common.sleep;
+        common.sleep = async () => {
+            common.sleep = originalSleep;
+            throw new Error("loop-stop");
+        };
+
+        return tuner.readyForJob(channel).then(() => {
+            throw new Error("should not resolve");
+        }, err => {
+            assert.strictEqual(err.message, "loop-stop");
+            common.sleep = originalSleep;
+        });
+    });
+
+    it("does not fall back to remote tuners when a local tuner is merely cooling down", async () => {
+        const tuner = Object.create(Tuner.prototype);
+        tuner._readyForJobPickedDeviceSet = new Set();
+        const channel = createChannel();
+        const localCooldown = {
+            index: 0,
+            isRemote: false,
+            isAvailable: true,
+            isFree: true,
+            isUsing: false,
+            channel: null,
+            users: [],
+            getPriority: () => -2,
+            canReuseStream: () => false,
+            canStartStream: () => false,
+            config: { name: "LOCAL-GR-1", types: ["GR-ALT"] }
+        };
+        const remote = createPickDevice({ index: 1, isRemote: true, free: true });
+        tuner._devices = [localCooldown, remote];
+
+        const originalSleep = common.sleep;
+        common.sleep = async () => {
+            common.sleep = originalSleep;
+            throw new Error("loop-stop");
+        };
+
+        return tuner.readyForJob(channel).then(() => {
+            throw new Error("should not resolve");
+        }, err => {
+            assert.strictEqual(err.message, "loop-stop");
+            common.sleep = originalSleep;
+        });
     });
 });

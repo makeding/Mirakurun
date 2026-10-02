@@ -466,7 +466,11 @@ export class Service {
             key: `Service.Update.Scan.${channel.type}.${channel.channel}`,
             name: `Service Update Scan ${channel.type}/${channel.channel}`,
             fn: async () => this._scan(channel, false),
-            readyFn: () => _.tuner.readyForJob(channel)
+            readyFn: () => _.tuner.readyForJob(channel),
+            // ストリームによる preempt 等で中断された場合も再試行する (readyForJob の remote フォールバックにより、ストリームと並行に完了できる)
+            retryOnFail: true,
+            retryMax: 4,
+            retryDelay: 1000 * 60
         });
     }
 

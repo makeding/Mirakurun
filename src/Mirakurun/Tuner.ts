@@ -89,31 +89,40 @@ export class Tuner {
             return true;
         }
 
-        // For background jobs, prefer local tuners but fall back to remote tuners.
+        // For background jobs, prefer local tuners but fall back to remote tuners
+        // when every local tuner is occupied (e.g. by a foreground stream),
+        // so background jobs (EPG gathering / service scan) can run alongside streams.
         const localDevices = allDevices.filter(d => !d.isRemote);
-        const devices = localDevices.length > 0 ? localDevices : allDevices;
-
-        if (devices.length === 0) {
-            log.warn("readyForJob: no tuners for background job on channel: %s (type=%s)", channel.name, channel.type);
-            return false;
-        }
+        const remoteDevices = allDevices.filter(d => d.isRemote);
 
         while (true) {
-            const pickableDevices = devices.filter(device => !this._readyForJobPickedDeviceSet.has(device));
-            if (pickableDevices.length === 0) {
+            const localPickable = localDevices.filter(device => !this._readyForJobPickedDeviceSet.has(device));
+            const remotePickable = remoteDevices.filter(device => !this._readyForJobPickedDeviceSet.has(device));
+
+            let device: TunerDevice | null = null;
+            if (localPickable.length > 0) {
+                device = this._pickTunerDevice(localPickable, channel, -1);
+            }
+            if (device === null && remotePickable.length > 0 && localDevices.every(d => d.isFree === false)) {
+                device = this._pickTunerDevice(remotePickable, channel, -1);
+                if (device !== null) {
+                    log.info(
+                        "readyForJob: falling back to remote tuner #%d (%s) because local tuners are busy",
+                        device.index,
+                        device.config.name
+                    );
+                }
+            }
+
+            if (device === null) {
                 log.debug("readyForJob: no pickable tuners for channel type: %s", channel.type);
                 await common.sleep(1000 * 10);
                 continue;
             }
-            const device = this._pickTunerDevice(pickableDevices, channel, -1);
-            if (device === null) {
-                // log.debug("readyForJob: no available tuners for channel type: %s", channel.type);
-                await common.sleep(1000 * 10);
-                continue;
-            }
+
             // pick したチューナーを少し保持する
             this._readyForJobPickedDeviceSet.add(device);
-            log.debug("readyForJob: picked device: #%d (%s)", device.config.name);
+            log.debug("readyForJob: picked device: #%d (%s)", device.index, device.config.name);
 
             setTimeout(() => {
                 // 開放
@@ -708,6 +717,7 @@ export class Tuner {
                         device.channel.name,
                         channel.name
                     );
+                    this._requeueBackgroundJobs(device);
                     return device;
                 }
             }
@@ -750,6 +760,19 @@ export class Tuner {
         }
 
         return null;
+    }
+
+    /**
+     * フォアグラウンドのストリームがバックグラウンドジョブを preempt した後、
+     * 次の EPG.Gatherer スケジュールを待たずに、中断された EPG 収集をすぐに再スケジュールする。
+     */
+    private _requeueBackgroundJobs(device: TunerDevice): void {
+        for (const user of device.users) {
+            if (user.id === "Mirakurun:getEPG()") {
+                _.job.runSchedule("EPG.Gatherer");
+                return;
+            }
+        }
     }
 
     private async _rebalanceForChannel(channel: ChannelItem, priority: number): Promise<boolean> {
