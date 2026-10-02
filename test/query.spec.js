@@ -187,7 +187,7 @@ describe("[query.spec] sift is not called for $where", () => {
       for (const query of blocked) {
         calls = 0;
         const res = fakeRes();
-        await get({ query }, res, () => {
+        await get({ query, get: () => undefined }, res, () => {
           throw new Error("next");
         });
         assert.strictEqual(res.statusCode, 400);
@@ -196,7 +196,7 @@ describe("[query.spec] sift is not called for $where", () => {
 
       calls = 0;
       const ok = fakeRes();
-      await get({ query: { startAt: { $gte: 1 } } }, ok, () => {
+      await get({ query: { startAt: { $gte: 1 } }, get: () => undefined }, ok, () => {
         throw new Error("next");
       });
       assert.notStrictEqual(ok.statusCode, 400);
@@ -219,7 +219,7 @@ describe("[query.spec] sift is not called for $where", () => {
     }
 
     let forwarded;
-    await services.get({ query }, fakeRes(), (err) => {
+    await services.get({ query, get: () => undefined }, fakeRes(), (err) => {
       forwarded = err;
     });
     assert.ok(!(forwarded instanceof common.WhereQueryError));
