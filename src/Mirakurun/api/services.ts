@@ -19,26 +19,36 @@ import * as api from "../api";
 import * as apid from "../../../api";
 import _ from "../_";
 import Service from "../Service";
-import { channelTypes } from "../common";
+import { channelTypes, rejectWhere, WhereQueryError } from "../common";
 
-export const get: Operation = async (req, res) => {
-    const serviceItems = [..._.service.items]; // shallow copy
-    serviceItems.sort((a, b) => a.getOrder() - b.getOrder());
+export const get: Operation = async (req, res, next) => {
+    try {
+        rejectWhere(req.query);
 
-    const services: apid.Service[] = [];
+        const serviceItems = [..._.service.items]; // shallow copy
+        serviceItems.sort((a, b) => a.getOrder() - b.getOrder());
 
-    const localTunerOnly = req.get("X-Mirakurun-Local-Tuner-Only") === "1";
-    for (const serviceItem of serviceItems.filter(sift(req.query))) {
-        if (localTunerOnly === true && _.tuner.hasLocalTunerForChannel(serviceItem.channel) === false) {
-            continue;
+        const services: apid.Service[] = [];
+
+        const localTunerOnly = req.get("X-Mirakurun-Local-Tuner-Only") === "1";
+        for (const serviceItem of serviceItems.filter(sift(req.query))) {
+            if (localTunerOnly === true && _.tuner.hasLocalTunerForChannel(serviceItem.channel) === false) {
+                continue;
+            }
+            services.push({
+                ...serviceItem.export(),
+                hasLogoData: await Service.isLogoDataExists(serviceItem.networkId, serviceItem.logoId)
+            });
         }
-        services.push({
-            ...serviceItem.export(),
-            hasLogoData: await Service.isLogoDataExists(serviceItem.networkId, serviceItem.logoId)
-        });
-    }
 
-    api.responseJSON(res, services);
+        api.responseJSON(res, services);
+    } catch (err) {
+        if (err instanceof WhereQueryError) {
+            api.responseError(res, 400);
+            return;
+        }
+        next(err);
+    }
 };
 
 get.apiDoc = {
