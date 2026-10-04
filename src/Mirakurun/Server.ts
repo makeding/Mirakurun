@@ -57,6 +57,15 @@ export class Server {
             throw new Error("Server is running");
         }
         this._isRunning = true;
+        try {
+            await _.program.snapshot.start();
+        } catch (err) {
+            this._isRunning = false;
+            throw err;
+        }
+        if (!this._isRunning) {
+            return;
+        }
 
         const serverConfig = _.config.server;
 
@@ -258,6 +267,7 @@ export class Server {
 
         this._isRunning = false;
         clearInterval(this._networkInterfaceRefreshTimer);
+        await _.program.snapshot.stop();
 
         for (const rpc of this._rpcs) {
             await rpc.close();

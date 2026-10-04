@@ -21,12 +21,14 @@ import * as apid from "../../api";
 import _ from "./_";
 import Event from "./Event";
 import { JobItem } from "./Job";
+import { ProgramSnapshot } from "./ProgramSnapshot";
 
 export function getProgramItemId(networkId: number, serviceId: number, eventId: number): number {
     return parseInt(`${networkId}${serviceId.toString(10).padStart(5, "0")}${eventId.toString(10).padStart(5, "0")}`, 10);
 }
 
 export class Program {
+    private _snapshot?: ProgramSnapshot;
     private _itemMap = new Map<number, db.Program>();
     private _itemMapDeleted = new Map<number, db.Program>();
     private _saveTimerId: NodeJS.Timeout;
@@ -54,6 +56,13 @@ export class Program {
             schedule: _.config.server.programGCJobSchedule || "45 * * * *",
             job: gcJob
         });
+    }
+
+    get snapshot(): ProgramSnapshot {
+        if (!this._snapshot) {
+            this._snapshot = new ProgramSnapshot(() => this._itemMap.values());
+        }
+        return this._snapshot;
     }
 
     get itemMap(): Map<number, db.Program> {

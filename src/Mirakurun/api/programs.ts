@@ -15,29 +15,25 @@
 */
 import { Operation } from "express-openapi";
 import * as api from "../api";
-import * as apid from "../../../api";
 import _ from "../_";
 import { rejectWhere, WhereQueryError } from "../common";
 
-export const get: Operation = (req, res) => {
+export const get: Operation = async (req, res, next) => {
     try {
         rejectWhere(req.query);
-
-        let programs: apid.Program[];
-
-        // tslint:disable-next-line:prefer-conditional-expression
-        if (Object.keys(req.query).length !== 0) {
-            programs = _.program.findByQuery(req.query);
-        } else {
-            programs = Array.from(_.program.itemMap.values());
+        const json = await _.program.snapshot.getResponse(req.query);
+        if (res.destroyed) {
+            return;
         }
-
-        api.responseJSON(res, programs);
+        res.setHeader("Content-Type", "application/json; charset=utf-8");
+        res.setHeader("Content-Length", json.length);
+        res.status(200).end(json);
     } catch (err) {
         if (err instanceof WhereQueryError) {
-            return api.responseError(res, 400);
+            api.responseError(res, 400);
+            return;
         }
-        throw err;
+        next(err);
     }
 };
 

@@ -127,11 +127,12 @@ describe("[query.spec] rejectWhere", () => {
 });
 
 describe("[query.spec] sift is not called for $where", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     calls = 0;
     lastQuery = undefined;
     impl = () => () => true;
     _.program = programStore();
+    await _.program.snapshot.refresh();
     _.channel = {
       items: [],
       findByType() {
@@ -210,7 +211,7 @@ describe("[query.spec] sift is not called for $where", () => {
     };
     const query = { name: "news" };
 
-    for (const get of [programs.get, channels.get, channelsByType.get]) {
+    for (const get of [channels.get, channelsByType.get]) {
       await assert.rejects(async () => get({ query, params: { type: "GR" } }, fakeRes()), (err) => {
         assert.ok(!(err instanceof common.WhereQueryError));
         assert.strictEqual(err.message, "sift failed");
@@ -219,9 +220,14 @@ describe("[query.spec] sift is not called for $where", () => {
     }
 
     let forwarded;
-    await services.get({ query, get: () => undefined }, fakeRes(), (err) => {
-      forwarded = err;
-    });
+    for (const get of [programs.get, services.get]) {
+      forwarded = undefined;
+      await get({ query, get: () => undefined }, fakeRes(), (err) => {
+        forwarded = err;
+      });
+      assert.ok(!(forwarded instanceof common.WhereQueryError));
+      assert.strictEqual(forwarded.message, "sift failed");
+    }
     assert.ok(!(forwarded instanceof common.WhereQueryError));
     assert.strictEqual(forwarded.message, "sift failed");
   });
