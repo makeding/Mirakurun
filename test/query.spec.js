@@ -67,6 +67,11 @@ function fakeRes() {
 function programStore() {
   const program = Object.create(Program.prototype);
   program._itemMap = new Map([[1, { id: 1 }]]);
+  Object.defineProperty(program, "history", { value: {
+    async programs() {
+      return "[]";
+    }
+  }, writable: true });
   return program;
 }
 
@@ -132,7 +137,6 @@ describe("[query.spec] sift is not called for $where", () => {
     lastQuery = undefined;
     impl = () => () => true;
     _.program = programStore();
-    await _.program.snapshot.refresh();
     _.channel = {
       items: [],
       findByType() {
@@ -201,7 +205,7 @@ describe("[query.spec] sift is not called for $where", () => {
         throw new Error("next");
       });
       assert.notStrictEqual(ok.statusCode, 400);
-      assert.strictEqual(calls, 1);
+      assert.strictEqual(calls, get === programs.get ? 0 : 1);
     }
   });
 
@@ -220,7 +224,17 @@ describe("[query.spec] sift is not called for $where", () => {
     }
 
     let forwarded;
-    for (const get of [programs.get, services.get]) {
+    _.program.history.programs = async () => {
+      throw new Error("history failed");
+    };
+    forwarded = undefined;
+    await programs.get({ query, get: () => undefined }, fakeRes(), err => {
+      forwarded = err;
+    });
+    assert.ok(!(forwarded instanceof common.WhereQueryError));
+    assert.strictEqual(forwarded.message, "history failed");
+
+    for (const get of [services.get]) {
       forwarded = undefined;
       await get({ query, get: () => undefined }, fakeRes(), (err) => {
         forwarded = err;
@@ -256,6 +270,7 @@ describe("[query.spec] real sift", () => {
 
       const program = Object.create(Program.prototype);
       program._itemMap = new Map([[1, { id: 1 }]]);
+      Object.defineProperty(program, "history", { value: { programs: async () => "[]" } });
       _.program = program;
       assert.throws(() => program.findByQuery(query), (err) => err instanceof common.WhereQueryError);
       assert.strictEqual(globalThis.__mirakurunWhereHit, undefined);

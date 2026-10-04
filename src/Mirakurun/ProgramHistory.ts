@@ -17,6 +17,7 @@ import { Worker } from "worker_threads";
 import { join } from "path";
 import * as apid from "../../api";
 import { Program } from "./db";
+import { rejectWhere } from "./common";
 
 export interface HistoryMutation {
     program: Program;
@@ -148,6 +149,13 @@ export class ProgramHistory {
     async list(query: object): Promise<apid.ProgramHistoryPage> {
         await this.flush();
         return this._request("list", query);
+    }
+
+    /** Query current persisted programs; no response cache or main-thread filtering. */
+    async programs(query: object): Promise<string> {
+        rejectWhere(query);
+        await this.flush();
+        return this._request("programs", query);
     }
 
     async get(historyId: string): Promise<apid.ProgramHistoryItem | null> {

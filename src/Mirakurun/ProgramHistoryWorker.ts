@@ -23,6 +23,8 @@ import { dirname } from "path";
 import * as apid from "../../api";
 import { Program } from "./db";
 import type { HistoryMutation, HistoryOptions } from "./ProgramHistory";
+import sift from "sift";
+import { rejectWhere } from "./common";
 
 const DAY = 86400000;
 let database: DatabaseSync;
@@ -103,9 +105,22 @@ function writeMutation(mutation: HistoryMutation): void {
         database.prepare(`INSERT INTO revisions (history_id, revision, observed_at, change_type, reason, program_json)
             VALUES (?, ?, ?, ?, ?, ?)`).run(row.history_id, revision, observedAt, changeType, reason || null, publicJSON);
     }
+    if (status === "active") {
+        database.prepare(`INSERT INTO current_programs
+            (program_id, network_id, service_id, event_id, end_at, internal_json) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(program_id) DO UPDATE SET network_id=excluded.network_id,
+            service_id=excluded.service_id, event_id=excluded.event_id,
+            end_at=excluded.end_at, internal_json=excluded.internal_json`).run(
+            program.id, program.networkId, program.serviceId, program.eventId,
+            program.startAt + program.duration, JSON.stringify(program));
+    } else {
+        database.prepare("DELETE FROM current_programs WHERE program_id=? AND network_id=? AND service_id=? AND event_id=?")
+            .run(program.id, program.networkId, program.serviceId, program.eventId);
+    }
 }
 
 function cleanup(now: number): void {
+    database.prepare("DELETE FROM current_programs WHERE end_at < ?").run(now - retentionDays * DAY);
     database.prepare("DELETE FROM programs WHERE end_at < ?").run(now - retentionDays * DAY);
 }
 
@@ -120,7 +135,7 @@ function open(options: HistoryOptions): { active: Program[]; removed: Program[] 
     database = new DatabaseSync(options.path, { timeout: 5000 });
     database.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON");
     const schema = Number(database.prepare("PRAGMA user_version").get().user_version);
-    if (schema !== 0 && schema !== 1) {
+    if (schema !== 0 && schema !== 1 && schema !== 2) {
         throw new Error(`Unsupported program history schema ${schema}`);
     }
     database.exec(`CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -142,9 +157,27 @@ function open(options: HistoryOptions): { active: Program[]; removed: Program[] 
             revision INTEGER NOT NULL, observed_at INTEGER NOT NULL,
             change_type TEXT NOT NULL, reason TEXT, program_json TEXT NOT NULL,
             PRIMARY KEY(history_id, revision));
-        PRAGMA user_version=1;`);
+        CREATE TABLE IF NOT EXISTS current_programs (
+            position INTEGER PRIMARY KEY AUTOINCREMENT, program_id INTEGER NOT NULL UNIQUE,
+            network_id INTEGER NOT NULL, service_id INTEGER NOT NULL, event_id INTEGER NOT NULL,
+            end_at INTEGER NOT NULL, internal_json TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS current_programs_network ON current_programs(network_id, position);
+        CREATE INDEX IF NOT EXISTS current_programs_service ON current_programs(service_id, position);
+        CREATE INDEX IF NOT EXISTS current_programs_event ON current_programs(event_id, position);`);
     const now = Date.now();
     transaction(() => {
+        if (schema < 2) {
+            // Match the old startup Map: first insertion sets order, later IDs replace data.
+            for (const row of database.prepare("SELECT * FROM programs WHERE status='active' ORDER BY sequence").all()) {
+                database.prepare(`INSERT INTO current_programs
+                    (program_id, network_id, service_id, event_id, end_at, internal_json) VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(program_id) DO UPDATE SET network_id=excluded.network_id,
+                    service_id=excluded.service_id, event_id=excluded.event_id,
+                    end_at=excluded.end_at, internal_json=excluded.internal_json`).run(
+                    row.program_id, row.network_id, row.service_id, row.event_id, row.end_at, row.internal_json);
+            }
+            database.exec("PRAGMA user_version=2");
+        }
         const migrated = database.prepare("SELECT value FROM metadata WHERE key='legacy-imported'").get();
         if (!migrated) {
             if (options.legacyPath && existsSync(options.legacyPath)) {
@@ -181,11 +214,39 @@ function open(options: HistoryOptions): { active: Program[]; removed: Program[] 
         database.prepare("INSERT OR REPLACE INTO metadata VALUES ('channels-integrity',?)").run(options.integrity);
         cleanup(now);
     });
-    const active = database.prepare("SELECT internal_json FROM programs WHERE status='active' ORDER BY sequence").all()
+    const active = database.prepare("SELECT internal_json FROM current_programs ORDER BY position").all()
         .map(row => JSON.parse(row.internal_json as string));
     const removed = database.prepare("SELECT internal_json FROM programs WHERE status='removed' AND recoverable=1 AND end_at>=? AND sequence=(SELECT MAX(p.sequence) FROM programs p WHERE p.network_id=programs.network_id AND p.service_id=programs.service_id AND p.event_id=programs.event_id)").all(now - DAY)
         .map(row => JSON.parse(row.internal_json as string));
     return { active, removed };
+}
+
+function programs(query: any): string {
+    rejectWhere(query);
+    const filters: string[] = [];
+    const values: SQLInputValue[] = [];
+    const remaining = { ...query };
+    for (const [field, column] of [["networkId", "network_id"], ["serviceId", "service_id"], ["eventId", "event_id"]]) {
+        if (Number.isSafeInteger(query[field])) {
+            filters.push(`${column}=?`);
+            values.push(query[field]);
+            delete remaining[field];
+        }
+    }
+    if (Object.keys(remaining).length > 0) {
+        let matches: (program: Program) => boolean;
+        try {
+            matches = sift(remaining);
+        } catch (err) {
+            throw new QueryError(err.message);
+        }
+        // The existing extended query contract is evaluated inside SQLite's worker.
+        database.function("program_matches", (json: string) => matches(JSON.parse(json)) ? 1 : 0);
+        filters.push("program_matches(internal_json)=1");
+    }
+    const rows = database.prepare(`SELECT internal_json FROM current_programs
+        ${filters.length ? `WHERE ${filters.join(" AND ")}` : ""} ORDER BY position`).all(...values);
+    return `[${rows.map(row => row.internal_json).join(",")}]`;
 }
 
 function item(row: any): apid.ProgramHistoryItem {
@@ -313,6 +374,7 @@ parentPort.on("message", ({ id, method, data }) => {
             case "write": result = transaction(() => { for (const mutation of data) { writeMutation(mutation); } }); break;
             case "cleanup": result = transaction(() => cleanup(data)); break;
             case "list": result = list(data); break;
+            case "programs": result = programs(data); break;
             case "get": result = get(data); break;
             case "revisions": result = revisions(data.historyId, data.query); break;
             case "response": {

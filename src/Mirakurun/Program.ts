@@ -23,14 +23,12 @@ import * as apid from "../../api";
 import _ from "./_";
 import Event from "./Event";
 import { JobItem } from "./Job";
-import { ProgramSnapshot } from "./ProgramSnapshot";
 
 export function getProgramItemId(networkId: number, serviceId: number, eventId: number): number {
     return parseInt(`${networkId}${serviceId.toString(10).padStart(5, "0")}${eventId.toString(10).padStart(5, "0")}`, 10);
 }
 
 export class Program {
-    private _snapshot?: ProgramSnapshot;
     private _itemMap = new Map<number, db.Program>();
     private _itemMapDeleted = new Map<number, db.Program>();
     private _history?: ProgramHistory;
@@ -73,13 +71,6 @@ export class Program {
             throw new HistoryError("Program history is not available");
         }
         return this._history;
-    }
-
-    get snapshot(): ProgramSnapshot {
-        if (!this._snapshot) {
-            this._snapshot = new ProgramSnapshot(() => this._itemMap.values());
-        }
-        return this._snapshot;
     }
 
     get itemMap(): Map<number, db.Program> {
@@ -276,7 +267,6 @@ export class Program {
     save(): void {
         clearTimeout(this._emitTimerId);
         this._emitTimerId = setTimeout(() => this._emit(), 1000);
-        this._snapshot?.invalidate();
     }
 
     async load(): Promise<void> {
@@ -311,7 +301,6 @@ export class Program {
     async close(): Promise<void> {
         this._closed = true;
         clearTimeout(this._emitTimerId);
-        await this._snapshot?.stop();
         await this._history?.close();
     }
 

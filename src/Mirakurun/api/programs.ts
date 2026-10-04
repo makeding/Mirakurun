@@ -17,20 +17,25 @@ import { Operation } from "express-openapi";
 import * as api from "../api";
 import _ from "../_";
 import { rejectWhere, WhereQueryError } from "../common";
+import { HistoryError } from "../ProgramHistory";
 
 export const get: Operation = async (req, res, next) => {
     try {
         rejectWhere(req.query);
-        const json = await _.program.snapshot.getResponse(req.query);
+        const json = await _.program.history.programs(req.query);
         if (res.destroyed) {
             return;
         }
         res.setHeader("Content-Type", "application/json; charset=utf-8");
-        res.setHeader("Content-Length", json.length);
+        res.setHeader("Content-Length", Buffer.byteLength(json));
         res.status(200).end(json);
     } catch (err) {
         if (err instanceof WhereQueryError) {
             api.responseError(res, 400);
+            return;
+        }
+        if (err instanceof HistoryError) {
+            api.responseError(res, err.status, err.message);
             return;
         }
         next(err);
@@ -70,6 +75,8 @@ get.apiDoc = {
                 }
             }
         },
+        400: { description: "Invalid query", schema: { $ref: "#/definitions/Error" } },
+        503: { description: "Program store unavailable", schema: { $ref: "#/definitions/Error" } },
         default: {
             description: "Unexpected Error",
             schema: {

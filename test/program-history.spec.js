@@ -235,6 +235,32 @@ describe("[program-history.spec] migration, restart, retention and failure", () 
         await second.close();
     });
 
+    it("automatically upgrades schema 1 and durably retains current query order", async t => {
+        const options = files(t, "sql-upgrade");
+        const original = new ProgramHistory(options);
+        await original.open();
+        const first = program(1);
+        const second = program(2, first.startAt + 3600000);
+        observe(original, first);
+        observe(original, second);
+        observe(original, { ...first, name: "改訂" });
+        await original.close();
+        const oldDatabase = new DatabaseSync(options.path);
+        oldDatabase.exec("DROP TABLE current_programs; PRAGMA user_version=1");
+        oldDatabase.close();
+        const upgraded = new ProgramHistory(options);
+        assert.deepEqual((await upgraded.open()).active, [{ ...first, name: "改訂" }, second]);
+        assert.deepEqual(JSON.parse(await upgraded.programs({})), [{ ...first, name: "改訂" }, second]);
+        observe(upgraded, first, "removed");
+        observe(upgraded, first);
+        assert.deepEqual(JSON.parse(await upgraded.programs({})), [second, first]);
+        await upgraded.close();
+        const restarted = new ProgramHistory(options);
+        assert.deepEqual((await restarted.open()).active, [second, first]);
+        assert.deepEqual(JSON.parse(await restarted.programs({})), [second, first]);
+        await restarted.close();
+    });
+
     it("keeps history when channel integrity changes and prevents old recovery", async t => {
         const options = files(t, "integrity");
         const first = new ProgramHistory(options);
@@ -418,9 +444,9 @@ describe("[program-history.spec] application writers and HTTP cold start", () =>
         await request(`/program-history/${randomUUID()}`, 404);
         await request(`/program-history/${randomUUID()}/revisions`, 404);
         store.set(current.id, { name: "updated" });
+        assert.deepEqual(await request("/programs"), [store.get(current.id)]);
         const updated = await request(`/program-history?${query}&eventId=1`);
         assert.equal(updated.items[0].program.name, "updated");
-        await new Promise(resolve => setTimeout(resolve, 1100));
         assert.deepEqual(await request("/programs"), [store.get(current.id)]);
         const versionPage = await request(`/program-history/${updated.items[0].historyId}/revisions?limit=1`);
         assert.ok(versionPage.nextCursor);
@@ -433,7 +459,17 @@ describe("[program-history.spec] application writers and HTTP cold start", () =>
         const all = await request(`/program-history?${query}&limit=500`);
         const concurrent = await Promise.all(Array.from({ length: 3 }, () => request(`/program-history?${query}&limit=500`)));
         for (const response of concurrent) { assert.equal(JSON.stringify(response) === JSON.stringify(all), true, "complete concurrent history page"); }
+        const expectedCurrent = [...store.itemMap.values()];
+        const responses = await Promise.all(["/programs", "/programs?networkId=1", "/programs?name=番組"].map(url => request(url)));
+        assert.deepEqual(responses[0], expectedCurrent);
+        assert.deepEqual(responses[1], expectedCurrent);
+        assert.deepEqual(responses[2], expectedCurrent.filter(item => item.name === "番組"));
+        const unicodeResponse = await fetch(base + "/programs");
+        const bytes = Buffer.from(await unicodeResponse.arrayBuffer());
+        assert.equal(Number(unicodeResponse.headers.get("content-length")), bytes.length);
+        await request("/programs?name%5B%24where%5D=true", 400);
         await store.history.close();
+        await request("/programs", 503);
         await request(`/program-history?${query}`, 503);
         await request(`/program-history/${archived.historyId}`, 503);
         await request(`/program-history/${archived.historyId}/revisions`, 503);
