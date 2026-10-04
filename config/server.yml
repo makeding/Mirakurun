@@ -10,3 +10,7 @@ path: /var/run/mirakurun.sock
 # Use this in LAN or VPN.
 # `~` to disable TCP port listening.
 port: 40772
+
+# programHistoryRetentionDays: <number>
+# Number of days to retain EPG history in SQLite.
+programHistoryRetentionDays: 365

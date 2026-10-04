@@ -63,6 +63,21 @@ export interface ProgramsQuery {
     eventId?: apid.EventId;
 }
 
+export interface ProgramHistoryQuery {
+    from: apid.UnixtimeMS;
+    to: apid.UnixtimeMS;
+    networkId?: apid.NetworkId;
+    serviceId?: apid.ServiceId;
+    eventId?: apid.EventId;
+    limit?: number;
+    cursor?: string;
+}
+
+export interface ProgramHistoryRevisionsQuery {
+    limit?: number;
+    cursor?: string;
+}
+
 export interface EventsQuery {
     resource?: apid.EventResource;
     type?: apid.EventType;
@@ -349,6 +364,21 @@ export class Client {
     async getProgram(id: apid.ProgramId): Promise<apid.Program> {
         const res = await this.call("getProgram", { id });
         return res.body as apid.Program;
+    }
+
+    async getProgramHistory(query: ProgramHistoryQuery): Promise<apid.ProgramHistoryPage> {
+        const res = await this.call("getProgramHistory", query);
+        return res.body as apid.ProgramHistoryPage;
+    }
+
+    async getProgramHistoryItem(historyId: string): Promise<apid.ProgramHistoryItem> {
+        const res = await this.call("getProgramHistoryItem", { historyId });
+        return res.body as apid.ProgramHistoryItem;
+    }
+
+    async getProgramHistoryRevisions(historyId: string, query?: ProgramHistoryRevisionsQuery): Promise<apid.ProgramHistoryRevisionPage> {
+        const res = await this.call("getProgramHistoryRevisions", { historyId, ...query });
+        return res.body as apid.ProgramHistoryRevisionPage;
     }
 
     async getProgramStream(opt: { id: apid.ProgramId, decode?: boolean, priority?: number, signal?: AbortSignal }): Promise<http.IncomingMessage>;

@@ -51,7 +51,7 @@ import * as log from "./Mirakurun/log";
 
 (<any> log).logLevel = log.LogLevel.INFO;
 _.event = new Event();
-_.program = new Program();
+_.program = new Program({ memoryOnly: true });
 const epg = new EPG();
 
 const size = fs.statSync(src).size;

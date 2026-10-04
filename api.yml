@@ -230,6 +230,81 @@ definitions:
           name:
             type: string
 
+  ProgramHistoryItem:
+    type: object
+    required:
+      - historyId
+      - program
+      - status
+      - firstObservedAt
+      - lastObservedAt
+      - revision
+    properties:
+      historyId:
+        type: string
+        format: uuid
+      program:
+        $ref: '#/definitions/Program'
+      status:
+        type: string
+        enum: [active, archived, removed]
+      firstObservedAt:
+        $ref: '#/definitions/UnixtimeMS'
+      lastObservedAt:
+        $ref: '#/definitions/UnixtimeMS'
+      revision:
+        type: integer
+        minimum: 1
+
+  ProgramHistoryRevision:
+    type: object
+    required:
+      - historyId
+      - revision
+      - observedAt
+      - changeType
+      - program
+    properties:
+      historyId:
+        type: string
+        format: uuid
+      revision:
+        type: integer
+        minimum: 1
+      observedAt:
+        $ref: '#/definitions/UnixtimeMS'
+      changeType:
+        type: string
+        enum: [create, update, remove, restore, archive]
+      reason:
+        type: string
+      program:
+        $ref: '#/definitions/Program'
+
+  ProgramHistoryPage:
+    type: object
+    required: [items, nextCursor]
+    properties:
+      items:
+        type: array
+        items:
+          $ref: '#/definitions/ProgramHistoryItem'
+      nextCursor:
+        type: string
+        x-nullable: true
+
+  ProgramHistoryRevisionPage:
+    type: object
+    required: [items, nextCursor]
+    properties:
+      items:
+        type: array
+        items:
+          $ref: '#/definitions/ProgramHistoryRevision'
+      nextCursor:
+        type: string
+        x-nullable: true
+
   ProgramGenre:
     type: object
     properties:
@@ -560,6 +635,9 @@ definitions:
         minimum: 0
       programGCJobSchedule:
         type: string
+      programHistoryRetentionDays:
+        type: integer
+        minimum: 1
       epgGatheringJobSchedule:
         type: string
       epgRetrievalTime:

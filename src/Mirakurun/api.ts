@@ -54,11 +54,11 @@ export function responseStreamErrorHandler(res: express.Response, err: NodeJS.Er
     return responseError(res, 500, err.message);
 }
 
-export async function responseJSON(res: express.Response, body: any): Promise<express.Response> {
+export async function responseJSON(res: express.Response, body: any, serialize: (value: any) => string | Promise<string> = stringifyAsync): Promise<express.Response> {
     // this is lighter than res.json()
     res.setHeader("Content-Type", "application/json; charset=utf-8");
     res.status(200);
-    res.end(await stringifyAsync(body));
+    res.end(await serialize(body));
 
     return res;
 }

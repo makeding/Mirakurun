@@ -20,7 +20,8 @@ import * as apid from "../../api";
 import { deepClone, rejectWhere } from "./common";
 import * as log from "./log";
 
-const REFRESH_INTERVAL_MS = 30000;
+const CHANGE_DELAY_MS = 1000;
+const RETRY_DELAY_MS = 30000;
 const BATCH_CHARACTERS = 64 * 1024;
 
 interface Snapshot {
@@ -62,26 +63,35 @@ export class ProgramSnapshot {
     private _refreshing?: Promise<void>;
     private _timer?: NodeJS.Timeout;
     private _lifecycle = 0;
+    private _started = false;
+    private _generation = 0;
+    private _publishedGeneration = -1;
 
     constructor(private _programs: () => Iterable<apid.Program>) {}
 
     async start(): Promise<void> {
-        const lifecycle = this._lifecycle;
-        await this.refresh();
-        if (lifecycle === this._lifecycle && !this._timer) {
-            this._timer = setInterval(() => {
-                this.refresh().catch(err => {
-                    const age = this._current ? Date.now() - this._current.capturedAt : null;
-                    log.error("Program snapshot refresh failed (snapshotAgeMs=%s): %s", age, err.stack || err);
-                });
-            }, REFRESH_INTERVAL_MS);
-            this._timer.unref();
+        this._started = true;
+        try {
+            await this.refresh();
+        } catch (err) {
+            this._started = false;
+            clearTimeout(this._timer);
+            this._timer = undefined;
+            throw err;
+        }
+    }
+
+    invalidate(): void {
+        ++this._generation;
+        if (this._started && !this._refreshing) {
+            this._schedule(CHANGE_DELAY_MS);
         }
     }
 
     async stop(): Promise<void> {
         ++this._lifecycle;
-        clearInterval(this._timer);
+        this._started = false;
+        clearTimeout(this._timer);
         this._timer = undefined;
         try {
             await this._refreshing;
@@ -94,8 +104,22 @@ export class ProgramSnapshot {
 
     refresh(): Promise<void> {
         if (!this._refreshing) {
-            this._refreshing = this._build().finally(() => {
+            clearTimeout(this._timer);
+            this._timer = undefined;
+            const generation = this._generation;
+            const lifecycle = this._lifecycle;
+            let failed = false;
+            this._refreshing = this._build(lifecycle).then(() => {
+                this._publishedGeneration = generation;
+            }, err => {
+                failed = true;
+                throw err;
+            }).finally(() => {
                 this._refreshing = undefined;
+                if (this._started && lifecycle === this._lifecycle &&
+                    (failed || this._generation !== this._publishedGeneration)) {
+                    this._schedule(failed ? RETRY_DELAY_MS : 0);
+                }
             });
         }
         return this._refreshing;
@@ -113,12 +137,29 @@ export class ProgramSnapshot {
         return serializePrograms(snapshot.programs.filter(sift(query)));
     }
 
-    private async _build(): Promise<void> {
+    private _schedule(delay: number): void {
+        if (this._timer) {
+            return;
+        }
+        this._timer = setTimeout(() => {
+            this._timer = undefined;
+            this.refresh().catch(err => {
+                const age = this._current ? Date.now() - this._current.capturedAt : null;
+                log.error("Program snapshot refresh failed (snapshotAgeMs=%s): %s", age, err.stack || err);
+            });
+        }, delay);
+        this._timer.unref();
+    }
+
+    private async _build(lifecycle: number): Promise<void> {
         const started = performance.now();
         const capturedAt = Date.now();
         // No await before this copy: EPG writers cannot interleave with capture.
         const programs: apid.Program[] = deepClone(Array.from(this._programs()));
         const json = await serializePrograms(programs);
+        if (lifecycle !== this._lifecycle) {
+            return;
+        }
         this._current = { programs, json, capturedAt };
         log.info("Program snapshot ready (programs=%d, bytes=%d, durationMs=%d)",
             programs.length, json.length, Math.round(performance.now() - started));

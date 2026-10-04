@@ -41,6 +41,7 @@ const {
     MAX_BUFFER_BYTES_BEFORE_READY,
     EVENT_END_TIMEOUT,
     PROGRAM_GC_JOB_SCHEDULE,
+    PROGRAM_HISTORY_RETENTION_DAYS,
     EPG_GATHERING_JOB_SCHEDULE,
     EPG_RETRIEVAL_TIME,
     LOGO_DATA_INTERVAL,
@@ -142,6 +143,13 @@ export async function loadServer(): Promise<Server> {
         if (typeof PROGRAM_GC_JOB_SCHEDULE !== "undefined" && isValidCronExpression(PROGRAM_GC_JOB_SCHEDULE)) {
             config.programGCJobSchedule = PROGRAM_GC_JOB_SCHEDULE;
         }
+        if (typeof PROGRAM_HISTORY_RETENTION_DAYS !== "undefined") {
+            if (/^[1-9][0-9]*$/.test(PROGRAM_HISTORY_RETENTION_DAYS) && Number.isSafeInteger(parseInt(PROGRAM_HISTORY_RETENTION_DAYS, 10))) {
+                config.programHistoryRetentionDays = parseInt(PROGRAM_HISTORY_RETENTION_DAYS, 10);
+            } else {
+                throw new Error("invalid PROGRAM_HISTORY_RETENTION_DAYS: expected a positive safe integer");
+            }
+        }
         if (typeof EPG_GATHERING_JOB_SCHEDULE !== "undefined" && isValidCronExpression(EPG_GATHERING_JOB_SCHEDULE)) {
             config.epgGatheringJobSchedule = EPG_GATHERING_JOB_SCHEDULE;
         }
@@ -197,6 +205,12 @@ export async function loadServer(): Promise<Server> {
             log.error("invalid server config property `jobMaxStandby`: %s", config.jobMaxStandby);
             delete config.jobMaxStandby;
         }
+    }
+
+    if (typeof config.programHistoryRetentionDays === "undefined") {
+        config.programHistoryRetentionDays = 365;
+    } else if (typeof config.programHistoryRetentionDays !== "number" || !Number.isSafeInteger(config.programHistoryRetentionDays) || config.programHistoryRetentionDays < 1) {
+        throw new Error("invalid server config property `programHistoryRetentionDays`: expected a positive safe integer");
     }
 
     // validate allowIPv4CidrRanges

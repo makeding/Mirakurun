@@ -113,8 +113,8 @@ describe("[program-snapshot.spec] complete independent snapshots", () => {
         for (const response of responses) { assert.strictEqual(response.toString(), JSON.stringify(data)); }
     });
 
-    it("refreshes every 30 seconds, retains failures and retries without request-triggered work", async t => {
-        t.mock.timers.enable({ apis: ["setInterval", "Date"] });
+    it("refreshes on changes without starvation, skips idle work, retains failures and retries", async t => {
+        t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
         const errors = [];
         t.mock.method(log, "error", (...args) => errors.push(args));
         const data = [{ id: 1, name: "old" }];
@@ -124,15 +124,22 @@ describe("[program-snapshot.spec] complete independent snapshots", () => {
         await snapshot.start();
         const old = await snapshot.getResponse({});
         data[0].name = "new";
-        t.mock.timers.tick(29999);
+        snapshot.invalidate();
+        t.mock.timers.tick(500);
+        snapshot.invalidate();
+        t.mock.timers.tick(499);
         assert.strictEqual(await snapshot.getResponse({}), old);
         assert.strictEqual(captures, 1);
         t.mock.timers.tick(1);
         await snapshot.refresh();
         assert.deepStrictEqual(await parsed(snapshot), data);
         const good = await snapshot.getResponse({});
-        data[0].unsupported = 1n;
+        const idleCaptures = captures;
         t.mock.timers.tick(30000);
+        assert.strictEqual(captures, idleCaptures);
+        data[0].unsupported = 1n;
+        snapshot.invalidate();
+        t.mock.timers.tick(1000);
         await assert.rejects(snapshot.refresh(), /BigInt/);
         await yieldImmediate();
         assert.strictEqual(await snapshot.getResponse({}), good);
@@ -162,7 +169,7 @@ describe("[program-snapshot.spec] complete independent snapshots", () => {
 
     it("does not restart a refresh timer after shutdown during initial preparation", async t => {
         const snapshot = new ProgramSnapshot(() => items());
-        const interval = t.mock.method(global, "setInterval");
+        const interval = t.mock.method(global, "setTimeout");
         const start = snapshot.start();
         const stop = snapshot.stop();
         await Promise.all([start, stop]);

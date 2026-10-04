@@ -67,6 +67,7 @@ export function getStatus(): apid.Status {
                 CHANNELS_CONFIG_PATH: process.env.CHANNELS_CONFIG_PATH,
                 SERVICES_DB_PATH: process.env.SERVICES_DB_PATH,
                 PROGRAMS_DB_PATH: process.env.PROGRAMS_DB_PATH,
+                PROGRAM_HISTORY_DB_PATH: process.env.PROGRAM_HISTORY_DB_PATH,
                 LOGO_DATA_DIR_PATH: process.env.LOGO_DATA_DIR_PATH
             },
             pid: process.pid,

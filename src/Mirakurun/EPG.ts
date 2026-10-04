@@ -163,6 +163,13 @@ export default class EPG {
 
         for (const e of eit.events) {
             let state: EventState;
+            if (UNKNOWN_START_TIME.compare(e.start_time) !== 0) {
+                const id = getProgramItemId(networkId, eit.service_id, e.event_id);
+                if (_.program.prepareEvent(id, getTimeFromMJD(e.start_time),
+                    UNKNOWN_DURATION.compare(e.duration) === 0 ? 1 : getTimeFromBCD24(e.duration))) {
+                    delete service[e.event_id];
+                }
+            }
 
             if (!service[e.event_id]) {
                 const id = getProgramItemId(networkId, eit.service_id, e.event_id);

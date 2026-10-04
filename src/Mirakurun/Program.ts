@@ -14,6 +14,8 @@
    limitations under the License.
 */
 import sift from "sift";
+import { dirname, join } from "path";
+import { HistoryError, ProgramHistory } from "./ProgramHistory";
 import * as common from "./common";
 import * as log from "./log";
 import * as db from "./db";
@@ -31,12 +33,20 @@ export class Program {
     private _snapshot?: ProgramSnapshot;
     private _itemMap = new Map<number, db.Program>();
     private _itemMapDeleted = new Map<number, db.Program>();
-    private _saveTimerId: NodeJS.Timeout;
+    private _history?: ProgramHistory;
+    private _loaded = false;
+    private _closed = false;
+    private _storageFailure?: Error;
+    private _memoryOnly: boolean;
     private _emitTimerId: NodeJS.Timeout;
     private _emitRunning = false;
     private _emitPrograms = new Map<db.Program, apid.EventType>();
 
-    constructor() {
+    constructor(private _options: { memoryOnly?: boolean; onStorageFailure?: (error: Error) => void } = {}) {
+        this._memoryOnly = _options.memoryOnly === true;
+        if (this._memoryOnly) {
+            return;
+        }
         const gcJob: JobItem = {
             key: "Program.GC",
             name: "Program GC",
@@ -47,7 +57,7 @@ export class Program {
             ...gcJob,
             readyFn: async () => {
                 await common.sleep(1000 * 5);
-                return true;
+                return this._loaded;
             }
         });
 
@@ -56,6 +66,13 @@ export class Program {
             schedule: _.config.server.programGCJobSchedule || "45 * * * *",
             job: gcJob
         });
+    }
+
+    get history(): ProgramHistory {
+        if (!this._history) {
+            throw new HistoryError("Program history is not available");
+        }
+        return this._history;
     }
 
     get snapshot(): ProgramSnapshot {
@@ -70,6 +87,10 @@ export class Program {
     }
 
     add(item: db.Program, firstAdd: boolean = false): void {
+        if (!firstAdd) {
+            this._assertWritable();
+            this.prepareEvent(item.id, item.startAt, item.duration);
+        }
         if (this.exists(item.id)) {
             return;
         }
@@ -87,7 +108,10 @@ export class Program {
             this._emitPrograms.set(item, "create");
         }
 
-        this.save();
+        if (!firstAdd) {
+            this._record(item, "active");
+            this.save();
+        }
     }
 
     get(id: number): db.Program | null {
@@ -95,6 +119,7 @@ export class Program {
     }
 
     set(id: number, props: Partial<db.Program>): void {
+        this._assertWritable();
         let item = this.get(id);
         if (!item) {
             // Recovers logically deleted item if that is exsts into the tempolally collection.
@@ -103,6 +128,7 @@ export class Program {
                 this._itemMap.set(item.id, item);
                 this._itemMapDeleted.delete(item.id);
                 this._emitPrograms.set(item, "create");
+                this._record(item, "active", "overlap-recovered");
                 this.save();
 
                 log.debug(
@@ -116,23 +142,40 @@ export class Program {
                 this._findAndRemoveConflicts(item);
             }
             this._emitPrograms.set(item, "update");
+            this._record(item, "active");
             this.save();
         }
     }
 
-    remove(id: number, logicallyDelete: boolean = false): void {
+    remove(id: number, logicallyDelete: boolean = false, reason = "removed"): void {
+        this._assertWritable();
+        const existing = this.get(id);
         if (logicallyDelete) {
             const item = this.get(id);
             if (item) {
                 this._itemMapDeleted.set(item.id, item);
                 this._itemMap.delete(id);
+                this._record(item, "removed", "overlap", true);
                 this.save();
             }
         } else {
             if (this._itemMap.delete(id)) {
+                this._record(existing, reason === "gc" || reason === "event-id-reused" ? "archived" : "removed", reason);
                 this.save();
             }
         }
+    }
+
+    /** Reset parser state when an event ID is reused, without using startAt as identity. */
+    prepareEvent(id: number, startAt: number, duration: number): boolean {
+        const old = this.get(id) || this._itemMapDeleted.get(id);
+        const reused = old && old.startAt + old.duration < Date.now() && old.startAt !== startAt &&
+            (startAt >= old.startAt + old.duration || startAt + duration <= old.startAt);
+        if (reused) {
+            this.remove(id, false, "event-id-reused");
+            this._itemMapDeleted.delete(id);
+        }
+        return !old || !!reused;
     }
 
     exists(id: number): boolean {
@@ -197,6 +240,7 @@ export class Program {
     }
 
     findByNetworkIdAndReplace(networkId: number, programs: db.Program[]): void {
+        this._assertWritable();
         let count = 0;
         const programIds = new Set(programs.map(program => program.id));
 
@@ -204,13 +248,14 @@ export class Program {
             if (item.networkId === networkId && programIds.has(item.id) === false) {
                 // Calling `this.remove(item)` here is safe.  Because that never
                 // changes the Array object we're iterating here.
-                this.remove(item.id);
+                this.remove(item.id, false, "remote-replaced");
                 Event.emit("program", "remove", { id: item.id });
                 --count;
             }
         }
 
         for (const program of programs) {
+            this.prepareEvent(program.id, program.startAt, program.duration);
             const item = this.get(program.id);
             if (item === null) {
                 this.add(program);
@@ -218,6 +263,7 @@ export class Program {
             } else if (JSON.stringify(item) !== JSON.stringify(program)) {
                 this._itemMap.set(program.id, program);
                 this._emitPrograms.set(program, "update");
+                this._record(program, "active", "remote-update");
                 ++count;
             }
         }
@@ -230,33 +276,54 @@ export class Program {
     save(): void {
         clearTimeout(this._emitTimerId);
         this._emitTimerId = setTimeout(() => this._emit(), 1000);
-        clearTimeout(this._saveTimerId);
-        this._saveTimerId = setTimeout(() => this._save(), 1000 * 30);
+        this._snapshot?.invalidate();
     }
 
     async load(): Promise<void> {
-        log.debug("loading programs...");
-
-        const now = Date.now();
-        let dropped = false;
-
-        const programs = await db.loadPrograms(_.configIntegrity.channels, true);
-        programs.forEach(item => {
-            if (item.networkId === undefined) {
-                dropped = true;
-                return;
-            }
-            if (now > (item.startAt + item.duration)) {
-                dropped = true;
-                return;
-            }
-
-            this.add(item, true);
-        });
-
-        if (dropped) {
-            this.save();
+        if (this._memoryOnly || this._loaded) {
+            return;
         }
+        this._history = new ProgramHistory({
+            path: process.env.PROGRAM_HISTORY_DB_PATH || join(dirname(process.env.PROGRAMS_DB_PATH || "/usr/local/var/db/mirakurun/programs.json"), "programs.sqlite"),
+            legacyPath: process.env.PROGRAMS_DB_PATH,
+            integrity: _.configIntegrity.channels,
+            retentionDays: _.config.server.programHistoryRetentionDays || 365,
+            onFailure: err => {
+                this._storageFailure = err;
+                log.fatal("%s", err.stack || err);
+                _.job?.close();
+                this._options.onStorageFailure?.(err);
+            }
+        });
+        const programs = await this._history.open();
+        for (const item of programs.active) {
+            this.add(item, true);
+        }
+        for (const item of programs.removed) {
+            if (!this._itemMap.has(item.id)) {
+                this._itemMapDeleted.set(item.id, item);
+            }
+        }
+        this._loaded = true;
+        await this._gc();
+    }
+
+    async close(): Promise<void> {
+        this._closed = true;
+        clearTimeout(this._emitTimerId);
+        await this._snapshot?.stop();
+        await this._history?.close();
+    }
+
+    private _assertWritable(): void {
+        if (this._closed || this._storageFailure || (this._memoryOnly === false && !this._loaded)) {
+            throw this._storageFailure || new HistoryError("Program store is not accepting updates");
+        }
+        this._history?.assertWritable();
+    }
+
+    private _record(program: db.Program, status: "active" | "archived" | "removed", reason?: string, recoverable = false): void {
+        this._history?.record({ program, status, reason, recoverable, observedAt: Date.now() });
     }
 
     private _findAndRemoveConflicts(added: db.Program): void {
@@ -306,17 +373,11 @@ export class Program {
         }
     }
 
-    private _save(): void {
-        log.debug("saving programs...");
-
-        // TODO: Do we need to save/load logically deleted items?
-        db.savePrograms(
-            Array.from(this._itemMap.values()),
-            _.configIntegrity.channels
-        );
-    }
-
     private async _gc(): Promise<void> {
+        if (!this._loaded || this._closed) {
+            return;
+        }
+        this._assertWritable();
         log.debug("Program GC has started");
 
         const shortExp = Date.now() - 1000 * 60 * 60 * 3; // 3 hour
@@ -330,7 +391,7 @@ export class Program {
                 maximum < item.startAt
             ) {
                 ++count;
-                this.remove(item.id);
+                this.remove(item.id, false, "gc");
             }
         }
 
@@ -342,9 +403,11 @@ export class Program {
             ) {
                 ++count;
                 this._itemMapDeleted.delete(item.id);
+                this._record(item, "archived", "gc");
             }
         }
 
+        await this._history?.cleanup();
         log.info("Program GC has finished and removed %d programs", count);
     }
 }

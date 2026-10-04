@@ -18,6 +18,7 @@ Buffer.poolSize = 0; // disable memory pool
 require("dotenv").config();
 import { execSync } from "child_process";
 import { createHash } from "crypto";
+import { dirname, join } from "path";
 
 if (process.platform !== "linux") {
     console.warn("running in not linux!");
@@ -53,6 +54,7 @@ setEnv("TUNERS_CONFIG_PATH", "/usr/local/etc/mirakurun/tuners.yml");
 setEnv("CHANNELS_CONFIG_PATH", "/usr/local/etc/mirakurun/channels.yml");
 setEnv("SERVICES_DB_PATH", "/usr/local/var/db/mirakurun/services.json");
 setEnv("PROGRAMS_DB_PATH", "/usr/local/var/db/mirakurun/programs.json");
+setEnv("PROGRAM_HISTORY_DB_PATH", join(dirname(process.env.PROGRAMS_DB_PATH), "programs.sqlite"));
 setEnv("LOGO_DATA_DIR_PATH", "/usr/local/var/db/mirakurun/logo-data");
 
 import _ from "./Mirakurun/_";
@@ -103,7 +105,7 @@ function sortForIntegrity(value: any): any {
     _.tuner = new Tuner();
     _.channel = new Channel();
     _.service = new Service();
-    _.program = new Program();
+    _.program = new Program({ onStorageFailure: () => { shutdown(1).catch(console.error); } });
     _.server = new Server();
 
     await _.service.load();
@@ -111,8 +113,32 @@ function sortForIntegrity(value: any): any {
 
     if (process.env.SETUP === "true") {
         log.info("setup is done.");
+        await _.program.close();
+        _.job.close();
         process.exit(0);
     }
 
-    _.server.init();
-})();
+    await _.server.init();
+})().catch(err => {
+    console.error(err.stack || err);
+    shutdown(1).catch(() => process.exit(1));
+});
+
+let shuttingDown: Promise<void>;
+function shutdown(code: number): Promise<void> {
+    if (!shuttingDown) {
+        shuttingDown = (async () => {
+            _.job?.close();
+            await Promise.allSettled((_.tuner?.devices || []).map(device => _.tuner.get(device.index).kill()));
+            try {
+                await _.server?.deinit();
+                await _.program?.close();
+            } finally {
+                process.exit(code);
+            }
+        })();
+    }
+    return shuttingDown;
+}
+process.on("SIGTERM", () => { shutdown(0).catch(console.error); });
+process.on("SIGINT", () => { shutdown(0).catch(console.error); });

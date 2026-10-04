@@ -85,6 +85,34 @@ export interface Program {
     relatedItems?: ProgramRelatedItem[];
 }
 
+export interface ProgramHistoryItem {
+    historyId: string;
+    program: Program;
+    status: "active" | "archived" | "removed";
+    firstObservedAt: UnixtimeMS;
+    lastObservedAt: UnixtimeMS;
+    revision: number;
+}
+
+export interface ProgramHistoryRevision {
+    historyId: string;
+    revision: number;
+    observedAt: UnixtimeMS;
+    changeType: "create" | "update" | "remove" | "restore" | "archive";
+    reason?: string;
+    program: Program;
+}
+
+export interface ProgramHistoryPage {
+    items: ProgramHistoryItem[];
+    nextCursor: string | null;
+}
+
+export interface ProgramHistoryRevisionPage {
+    items: ProgramHistoryRevision[];
+    nextCursor: string | null;
+}
+
 export interface ProgramGenre {
     lv1: number;
     lv2: number;
@@ -273,6 +301,7 @@ export interface ConfigServer {
     maxBufferBytesBeforeReady?: number;
     eventEndTimeout?: number;
     programGCJobSchedule?: string;
+    programHistoryRetentionDays?: number;
     epgGatheringJobSchedule?: string;
     epgRetrievalTime?: number;
     logoDataInterval?: number;

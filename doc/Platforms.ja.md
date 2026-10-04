@@ -160,7 +160,8 @@ vim /opt/mirakurun/config/channels.yml
   - `channels.yml`
 - データ: `/app-data/`
   - `services.json`
-  - `programs.json`
+  - `programs.sqlite` (+ `programs.sqlite-wal`, `programs.sqlite-shm`)
+  - `programs.json` (legacy upgrade input only)
 - Opt: `/opt/`
   - `bin/`
   - `bin/startup` - カスタム起動スクリプト (オプション)
@@ -174,7 +175,8 @@ vim /opt/mirakurun/config/channels.yml
   - `channels.yml`
 - データ: `/opt/mirakurun/data/`
   - `services.json`
-  - `programs.json`
+  - `programs.sqlite` (+ `programs.sqlite-wal`, `programs.sqlite-shm`)
+  - `programs.json` (legacy upgrade input only)
 - Opt: `/opt/mirakurun/opt/`
   - `bin/`
   - `bin/startup` - カスタム起動スクリプト (オプション)
@@ -227,7 +229,8 @@ pm2 save
   - `channels.yml`
 - データ: `/usr/local/var/db/mirakurun/`
   - `services.json`
-  - `programs.json`
+  - `programs.sqlite` (+ `programs.sqlite-wal`, `programs.sqlite-shm`)
+  - `programs.json` (legacy upgrade input only)
 - ログ: `/usr/local/var/log/`
   - `mirakurun.stdout.log` - 通常のログ
   - `mirakurun.stderr.log` - エラーログ

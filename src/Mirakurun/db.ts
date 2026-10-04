@@ -44,14 +44,6 @@ export async function saveServices(data: Service[], integrity: string): Promise<
     return save(process.env.SERVICES_DB_PATH, data, integrity);
 }
 
-export async function loadPrograms(integrity: string, sync = false): Promise<Program[]> {
-    return load(process.env.PROGRAMS_DB_PATH, integrity, sync);
-}
-
-export async function savePrograms(data: Program[], integrity: string): Promise<void> {
-    return save(process.env.PROGRAMS_DB_PATH, data, integrity);
-}
-
 // use queue because async fs ops is not thread safe
 const dbIOQueue = new Queue(1, Infinity);
 
