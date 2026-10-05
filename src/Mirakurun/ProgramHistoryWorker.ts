@@ -41,7 +41,13 @@ function transaction<T>(fn: () => T): T {
         database.exec("COMMIT");
         return value;
     } catch (err) {
-        database.exec("ROLLBACK");
+        // SQLite can automatically roll back on storage errors. A second
+        // rollback must not replace the error that caused the transaction to fail.
+        try {
+            database.exec("ROLLBACK");
+        } catch (rollbackError) {
+            err.rollbackError = rollbackError.message;
+        }
         throw err;
     }
 }
@@ -66,7 +72,13 @@ function validProgram(program: Program): boolean {
 }
 
 function writeMutation(mutation: HistoryMutation): void {
-    const { program, status, observedAt, reason } = mutation;
+    const { program, observedAt } = mutation;
+    let { status, reason } = mutation;
+    if (status === "active" && program.startAt + program.duration <
+        observedAt - (program.duration === 1 ? DAY : 3 * 3600000)) {
+        status = "archived";
+        reason = "gc";
+    }
     if (!validProgram(program)) {
         throw new Error("Invalid program supplied to history storage");
     }
@@ -388,6 +400,9 @@ parentPort.on("message", ({ id, method, data }) => {
         }
         parentPort.postMessage({ id, result });
     } catch (err) {
-        parentPort.postMessage({ id, error: { message: err.message, status: err.status || 503 } });
+        const details = [err.code, err.errcode, err.errstr].filter(value => value !== undefined).join(", ");
+        const message = `${method}: ${err.message}${details ? ` (${details})` : ""}` +
+            (err.rollbackError ? `; rollback also failed: ${err.rollbackError}` : "");
+        parentPort.postMessage({ id, error: { message, stack: err.stack, status: err.status || 503 } });
     }
 });

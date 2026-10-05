@@ -157,7 +157,7 @@ describe("[program-history.spec] immutable versions and identity", () => {
         data.startAt += 600000;
         observe(history, data, "active", now + 1000);
         assert.equal((await history.list(range())).items[0].historyId, original);
-        data.startAt += DAY;
+        data.startAt += 3 * DAY;
         observe(history, data, "active", now + 2 * DAY);
         const items = (await history.list(range())).items;
         assert.equal(items.length, 2);
@@ -324,9 +324,119 @@ describe("[program-history.spec] migration, restart, retention and failure", () 
         assert.throws(() => observe(history, program()), { status: 503 });
         await assert.rejects(history.list(range()), { status: 503 });
     });
+
+    for (const operation of ["write", "cleanup", "open"]) {
+        it(`preserves the original ${operation} error after SQLite automatically rolls back`, async t => {
+            const options = files(t, `rollback-${operation}`);
+            const initial = new ProgramHistory(options);
+            await initial.open();
+            const original = program();
+            observe(initial, original);
+            await initial.close();
+            const db = new DatabaseSync(options.path);
+            const failureMessage = `forced ${operation} storage failure`;
+            const target = operation === "write" ? "BEFORE INSERT ON revisions" :
+                operation === "cleanup" ? "BEFORE DELETE ON programs" : "BEFORE INSERT ON metadata";
+            try {
+                db.exec(`CREATE TRIGGER fail_transaction ${target} BEGIN
+                    SELECT RAISE(ROLLBACK, '${failureMessage}'); END`);
+            } finally { db.close(); }
+            const failures = [];
+            const history = new ProgramHistory({ ...options, onFailure: error => failures.push(error) });
+            const fail = async () => {
+                await history.open();
+                if (operation === "write") {
+                    observe(history, { ...original, name: "must not commit" });
+                    await history.flush();
+                } else if (operation === "cleanup") {
+                    await history.cleanup(Date.now() + 400 * DAY);
+                }
+            };
+            await assert.rejects(fail(), error => {
+                assert.equal(error.status, 503);
+                assert.ok(error.message.includes(`${operation}: ${failureMessage}`), error.message);
+                assert.ok(error.message.includes("ERR_SQLITE_ERROR"), error.message);
+                assert.ok(error.message.includes("1811"), error.message);
+                assert.ok(error.message.includes("rollback also failed: cannot rollback - no transaction is active"));
+                return true;
+            });
+            assert.equal(failures.length, 1);
+            assert.match(failures[0].stack, /ProgramHistoryWorker\.(js|ts)/);
+            assert.throws(() => observe(history, program(2)), { status: 503 });
+            await assert.rejects(history.programs({}), { status: 503 });
+            await history.close();
+            const check = new DatabaseSync(options.path);
+            try {
+                assert.equal(check.prepare("SELECT COUNT(*) AS n FROM revisions").get().n, 1);
+                assert.deepEqual(JSON.parse(check.prepare("SELECT internal_json FROM current_programs").get().internal_json), original);
+                assert.equal(check.prepare("SELECT COUNT(*) AS n FROM programs").get().n, 1);
+                check.exec("DROP TRIGGER fail_transaction");
+            } finally { check.close(); }
+            const restarted = new ProgramHistory(options);
+            assert.deepEqual((await restarted.open()).active, [original]);
+            await restarted.close();
+        });
+    }
 });
 
 describe("[program-history.spec] application writers and HTTP cold start", () => {
+    it("does not restore expired observations or grow unchanged archive revisions", async t => {
+        const options = files(t, "expired-observation");
+        const store = install(t, options);
+        await store.load();
+        const expired = program(1, Date.now() - 5 * DAY);
+        for (let i = 0; i < 32; ++i) {
+            store.add({ ...expired });
+            store.findByNetworkIdAndReplace(1, [{ ...expired }]);
+            await store._gc();
+        }
+        assert.equal(store.get(expired.id), null);
+        assert.deepEqual(JSON.parse(await store.history.programs({})), []);
+        let item = (await store.history.list(range())).items[0];
+        assert.equal(item.status, "archived");
+        assert.equal(item.revision, 1);
+        for (let i = 0; i < 32; ++i) { observe(store.history, expired); }
+        item = (await store.history.list(range())).items[0];
+        assert.equal(item.revision, 1, "worker also fences stale active observations");
+        const corrected = { ...expired, startAt: Date.now() - 60000 };
+        store.add(corrected);
+        assert.deepEqual(JSON.parse(await store.history.programs({})), [corrected]);
+    });
+
+    it("commits complete EIT audio descriptors once per event observation", async t => {
+        const options = files(t, "eit-audio");
+        const store = install(t, options);
+        await store.load();
+        const EPG = require("../lib/Mirakurun/EPG").default;
+        const timestamp = Math.floor((Date.now() + DAY) / 1000) * 1000;
+        const local = new Date(timestamp + 9 * 3600000);
+        const mjd = Math.floor(local.getTime() / DAY) + 40587;
+        const bcd = n => (Math.floor(n / 10) << 4) | n % 10;
+        const eit = {
+            table_id: 0x50, section_number: 0, version_number: 0,
+            original_network_id: 1, service_id: 1,
+            events: [{ event_id: 1,
+                start_time: Buffer.from([mjd >> 8, mjd & 255, bcd(local.getUTCHours()), bcd(local.getUTCMinutes()), bcd(local.getUTCSeconds())]),
+                duration: Buffer.from([1, 0, 0]), free_CA_mode: 0,
+                descriptors: [16, 17, 18].map(tag => ({ descriptor_tag: 0xC4, component_tag: tag,
+                    component_type: 3, main_component_flag: tag === 16 ? 1 : 0,
+                    sampling_rate: 7, ISO_639_language_code: Buffer.from("jpn") })) }]
+        };
+        // Independent gatherers reset parser state but must not manufacture
+        // partial audio revisions on every pass.
+        for (let i = 0; i < 32; ++i) { new EPG().write(eit); }
+        const item = (await store.history.list(range())).items[0];
+        assert.equal(item.revision, 1);
+        assert.equal(item.program.audios.length, 3);
+        assert.equal((await store.history.revisions(item.historyId, {})).items.length, 1);
+        eit.version_number = 1;
+        eit.events[0].descriptors[1].component_type = 9;
+        new EPG().write(eit);
+        const updated = (await store.history.list(range())).items[0];
+        assert.equal(updated.revision, 2);
+        assert.equal(updated.program.audios[1].componentType, 9);
+    });
+
     it("tracks EIT timing corrections and resets descriptor state when event IDs are reused", async t => {
         const options = files(t, "eit");
         const store = install(t, options);
@@ -474,4 +584,77 @@ describe("[program-history.spec] application writers and HTTP cold start", () =>
         await request(`/program-history/${archived.historyId}`, 503);
         await request(`/program-history/${archived.historyId}/revisions`, 503);
     });
+});
+
+// Opt-in acceptance against an exact copy of the supplied production snapshot.
+// The caller owns the copy, size budget and cleanup; never open the source writable.
+it("[program-history snapshot] cold start fences repeated expired observations through HTTP", {
+    skip: !process.env.MIRAKURUN_EPG_SNAPSHOT_COPY
+}, async t => {
+    const path = process.env.MIRAKURUN_EPG_SNAPSHOT_COPY;
+    const db = new DatabaseSync(path, { readOnly: true });
+    let integrity, rows, archived, counts;
+    try {
+        integrity = db.prepare("SELECT value FROM metadata WHERE key='channels-integrity'").get().value;
+        rows = db.prepare("SELECT internal_json FROM current_programs ORDER BY position").all().map(r => JSON.parse(r.internal_json));
+        archived = db.prepare("SELECT * FROM programs WHERE end_at < ? ORDER BY revision DESC LIMIT 1").get(Date.now() - 3 * 3600000);
+        counts = db.prepare("SELECT COUNT(*) AS n FROM revisions").get().n;
+    } finally { db.close(); }
+    assert.ok(rows.length > 0);
+    assert.ok(archived);
+    console.log(JSON.stringify({ snapshotBefore: { current: rows.length, revisions: counts, historyId: archived.history_id } }));
+    const options = { path, legacyPath: path + ".absent", integrity, retentionDays: 365 };
+    const store = install(t, options);
+    _.configIntegrity.channels = integrity;
+    const originalTimeout = global.setTimeout;
+    let Server;
+    global.setTimeout = (...args) => originalTimeout(...args).unref();
+    try { ({ Server } = require("../lib/Mirakurun/Server")); } finally { global.setTimeout = originalTimeout; }
+    const server = new Server();
+    server.testMode = true;
+    _.server = server;
+    _.tuner = { devices: [] };
+    _.service = { items: [], get: () => ({ id: 100001 }) };
+    _.channel = { items: [] };
+    _.config.server = { ..._.config.server, port: 0, disableIPv6: true, disableWebUI: true,
+        allowIPv4CidrRanges: ["127.0.0.0/8"], allowIPv6CidrRanges: [], allowOrigins: [] };
+    t.after(async () => {
+        for (const listener of server.servers) { listener.closeAllConnections(); }
+        const restoredProgram = _.program;
+        _.program = store;
+        try { await server.deinit(); } finally { _.program = restoredProgram; }
+    });
+    const beforeOpen = Date.now();
+    await store.load();
+    await server.init();
+    const base = `http://127.0.0.1:${[...server.servers][0].address().port}/api`;
+    const request = async url => {
+        const response = await fetch(base + url);
+        assert.equal(response.status, 200, url);
+        return response.json();
+    };
+    const expected = rows.filter(p => p.startAt + p.duration >= beforeOpen && p.startAt <= beforeOpen + 9 * DAY);
+    assert.deepEqual(await request("/programs"), expected);
+    const first = expected[0];
+    assert.ok(first);
+    const publicFirst = Object.fromEntries(Object.entries(first).filter(([k]) => !k.startsWith("_")));
+    assert.deepEqual(await request(`/programs/${first.id}`), publicFirst);
+    const item = await request(`/program-history/${archived.history_id}`);
+    assert.equal(item.status, "archived");
+    assert.deepEqual(item.program, JSON.parse(archived.program_json));
+    const versions = await request(`/program-history/${archived.history_id}/revisions`);
+    assert.ok(versions.items.length > 0);
+    const baselineRevision = item.revision;
+    const old = JSON.parse(archived.internal_json);
+    for (let i = 0; i < 32; ++i) { store.findByNetworkIdAndReplace(old.networkId,
+        [...store.itemMap.values()].filter(p => p.networkId === old.networkId).concat(old)); }
+    const after = await request(`/program-history/${archived.history_id}`);
+    assert.deepEqual(after, item);
+    assert.equal(after.revision, baselineRevision);
+    assert.deepEqual(await request("/programs"), expected);
+    const query = new URLSearchParams({ from: old.startAt - DAY, to: old.startAt + DAY,
+        networkId: old.networkId, serviceId: old.serviceId, eventId: old.eventId }).toString();
+    assert.ok((await request(`/program-history?${query}`)).items.some(p => p.historyId === archived.history_id));
+    console.log(JSON.stringify({ snapshotAfter: { current: expected.length, repeatedObservations: 32,
+        archivedRevisionBefore: baselineRevision, archivedRevisionAfter: after.revision } }));
 });

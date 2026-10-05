@@ -22,6 +22,23 @@ this preserves the deployed query contract without filtering an in-memory list
 on the HTTP thread. `$where` is rejected before compilation. Storage failure
 returns HTTP 503 rather than an empty or stale list.
 
+Transaction failure diagnostics retain the original SQLite error, its error
+codes, worker operation and stack. A failed explicit rollback is secondary:
+SQLite may already have rolled back the transaction automatically. Storage
+failure still blocks subsequent writes; failed batches are never treated as
+committed or retried blindly.
+
 Validation covers startup migration, immediate mutations, ordering, filtering,
 Unicode response lengths, concurrent HTTP requests, and unavailable storage.
 Local fixtures do not establish production-data or physical-tuner acceptance.
+
+Expired occurrences (three hours after end, or 24 hours for unknown duration)
+remain archived when observed again. Repeated observation must not restore them
+or append unchanged archive revisions. Startup removes expired current entries
+before serving readers. Real timing corrections that move an occurrence back
+into the current window can restore it.
+
+EIT descriptors for one event are applied together after the descriptor loop;
+partial audio and related-event lists are not independently persisted revisions.
+Separate completed event observations and explicit remove/restore transitions
+remain observable history changes. Existing historical revisions are retained.

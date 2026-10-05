@@ -28,6 +28,10 @@ export function getProgramItemId(networkId: number, serviceId: number, eventId: 
     return parseInt(`${networkId}${serviceId.toString(10).padStart(5, "0")}${eventId.toString(10).padStart(5, "0")}`, 10);
 }
 
+export function isExpiredProgram(program: Pick<db.Program, "startAt" | "duration">, now = Date.now()): boolean {
+    return program.startAt + program.duration < now - (program.duration === 1 ? 86400000 : 10800000);
+}
+
 export class Program {
     private _itemMap = new Map<number, db.Program>();
     private _itemMapDeleted = new Map<number, db.Program>();
@@ -80,6 +84,10 @@ export class Program {
     add(item: db.Program, firstAdd: boolean = false): void {
         if (!firstAdd) {
             this._assertWritable();
+            if (isExpiredProgram(item)) {
+                this._record(item, "archived", "gc");
+                return;
+            }
             this.prepareEvent(item.id, item.startAt, item.duration);
         }
         if (this.exists(item.id)) {
@@ -112,6 +120,14 @@ export class Program {
     set(id: number, props: Partial<db.Program>): void {
         this._assertWritable();
         let item = this.get(id);
+        const candidate = item || this._itemMapDeleted.get(id);
+        if (candidate && isExpiredProgram({ ...candidate, ...props })) {
+            this._record({ ...candidate, ...props }, "archived", "gc");
+            this._itemMap.delete(id);
+            this._itemMapDeleted.delete(id);
+            this.save();
+            return;
+        }
         if (!item) {
             // Recovers logically deleted item if that is exsts into the tempolally collection.
             item = this._itemMapDeleted.get(id) || null;
@@ -246,6 +262,13 @@ export class Program {
         }
 
         for (const program of programs) {
+            if (isExpiredProgram(program)) {
+                if (this.exists(program.id)) {
+                    this.remove(program.id, false, "gc");
+                }
+                this._record(program, "archived", "gc");
+                continue;
+            }
             this.prepareEvent(program.id, program.startAt, program.duration);
             const item = this.get(program.id);
             if (item === null) {

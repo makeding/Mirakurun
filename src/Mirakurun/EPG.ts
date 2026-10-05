@@ -16,6 +16,7 @@
 import { getProgramItemId } from "./Program";
 import { getTimeFromMJD, getTimeFromBCD24 } from "./common";
 import * as apid from "../../api";
+import { Program as ProgramData } from "./db";
 import _ from "./_";
 import { TsChar } from "@chinachu/aribts";
 import { EIT } from "@chinachu/aribts/lib/table/eit";
@@ -163,6 +164,8 @@ export default class EPG {
 
         for (const e of eit.events) {
             let state: EventState;
+            let added: ProgramData;
+            const descriptorProps: Partial<ProgramData> = {};
             if (UNKNOWN_START_TIME.compare(e.start_time) !== 0) {
                 const id = getProgramItemId(networkId, eit.service_id, e.event_id);
                 if (_.program.prepareEvent(id, getTimeFromMJD(e.start_time),
@@ -189,7 +192,7 @@ export default class EPG {
                         _isPresent: isP || undefined,
                         _isFollowing: isF || undefined
                     };
-                    _.program.add(programItem);
+                    added = programItem;
                 }
 
                 state = {
@@ -232,7 +235,7 @@ export default class EPG {
                     state.version[eit.table_id] = eit.version_number;
 
                     if (UNKNOWN_START_TIME.compare(e.start_time) !== 0) {
-                        _.program.set(state.programId, {
+                        Object.assign(descriptorProps, {
                             startAt: getTimeFromMJD(e.start_time),
                             duration: UNKNOWN_DURATION.compare(e.duration) === 0 ? 1 : getTimeFromBCD24(e.duration),
                             isFree: e.free_CA_mode === 0,
@@ -256,7 +259,7 @@ export default class EPG {
                         }
                         state.short.version[eit.table_id] = eit.version_number;
 
-                        _.program.set(state.programId, {
+                        Object.assign(descriptorProps, {
                             name: new TsChar(d.event_name_char).decode(),
                             description: new TsChar(d.text_char).decode()
                         });
@@ -319,7 +322,7 @@ export default class EPG {
                                     .join("\n\n");
                             }
 
-                            _.program.set(state.programId, {
+                            Object.assign(descriptorProps, {
                                 extended: extended
                             });
 
@@ -336,7 +339,7 @@ export default class EPG {
                         }
                         state.component.version[eit.table_id] = eit.version_number;
 
-                        _.program.set(state.programId, {
+                        Object.assign(descriptorProps, {
                             video: {
                                 type: <apid.ProgramVideoType> STREAM_CONTENT[d.stream_content] || null,
                                 resolution: <apid.ProgramVideoResolution> COMPONENT_TYPE[d.component_type] || null,
@@ -355,7 +358,7 @@ export default class EPG {
                         }
                         state.content.version[eit.table_id] = eit.version_number;
 
-                        _.program.set(state.programId, {
+                        Object.assign(descriptorProps, {
                             genres: d.contents.map(getGenre)
                         });
 
@@ -381,7 +384,7 @@ export default class EPG {
                             langs
                         };
 
-                        _.program.set(state.programId, {
+                        Object.assign(descriptorProps, {
                             audios: Object.values(state.audio._audios)
                         });
 
@@ -394,7 +397,7 @@ export default class EPG {
                         }
                         state.series.version[eit.table_id] = eit.version_number;
 
-                        _.program.set(state.programId, {
+                        Object.assign(descriptorProps, {
                             series: {
                                 id: d.series_id,
                                 repeat: d.repeat_label,
@@ -421,13 +424,18 @@ export default class EPG {
                             d.events.map(getRelatedProgramItem.bind(d)) :
                             d.other_network_events.map(getRelatedProgramItem.bind(d));
 
-                        _.program.set(state.programId, {
+                        Object.assign(descriptorProps, {
                             relatedItems: state.group._groups.flat()
                         });
 
                         break;
                 } // <- switch
             } // <- for
+            if (added) {
+                _.program.add({ ...added, ...descriptorProps });
+            } else if (Object.keys(descriptorProps).length > 0) {
+                _.program.set(state.programId, descriptorProps);
+            }
         } // <- for
     }
 

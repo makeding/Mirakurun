@@ -73,6 +73,9 @@ export class ProgramHistory {
             this._pending.delete(message.id);
             if (message.error) {
                 const error = new HistoryError(message.error.message, message.error.status);
+                if (message.error.stack) {
+                    error.stack += `\nStorage worker: ${message.error.stack}`;
+                }
                 pending.reject(error);
                 if (error.status !== 400) {
                     this._fail(error);
@@ -212,6 +215,7 @@ export class ProgramHistory {
             return;
         }
         this._failure = new HistoryError(`Program history storage failed: ${error.message}`);
+        this._failure.stack += `\nCaused by: ${error.stack || error.message}`;
         clearTimeout(this._timer);
         for (const pending of this._pending.values()) {
             pending.reject(this._failure);
