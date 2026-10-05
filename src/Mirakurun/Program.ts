@@ -28,7 +28,7 @@ export function getProgramItemId(networkId: number, serviceId: number, eventId: 
     return parseInt(`${networkId}${serviceId.toString(10).padStart(5, "0")}${eventId.toString(10).padStart(5, "0")}`, 10);
 }
 
-export function isExpiredProgram(program: Pick<db.Program, "startAt" | "duration">, now = Date.now()): boolean {
+function isExpiredProgram(program: Pick<db.Program, "startAt" | "duration">, now = Date.now()): boolean {
     return program.startAt + program.duration < now - (program.duration === 1 ? 86400000 : 10800000);
 }
 
@@ -392,14 +392,12 @@ export class Program {
         this._assertWritable();
         log.debug("Program GC has started");
 
-        const shortExp = Date.now() - 1000 * 60 * 60 * 3; // 3 hour
-        const longExp = Date.now() - 1000 * 60 * 60 * 24; // 24 hours
         const maximum = Date.now() + 1000 * 60 * 60 * 24 * 9; // 9 days
         let count = 0;
 
         for (const item of this._itemMap.values()) {
             if (
-                (item.duration === 1 ? longExp : shortExp) > (item.startAt + item.duration) ||
+                isExpiredProgram(item) ||
                 maximum < item.startAt
             ) {
                 ++count;
@@ -410,7 +408,7 @@ export class Program {
         // Perform GC for the logically-deleted store
         for (const item of this._itemMapDeleted.values()) {
             if (
-                (item.duration === 1 ? longExp : shortExp) > (item.startAt + item.duration) ||
+                isExpiredProgram(item) ||
                 maximum < item.startAt
             ) {
                 ++count;
