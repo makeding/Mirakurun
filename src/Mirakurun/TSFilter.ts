@@ -133,7 +133,6 @@ export default class TSFilter extends EventEmitter {
     private _serviceIds = new Set<number>();
     private _parseServiceIds = new Set<number>();
     private _pmtPid = -1;
-    private _pmtTimer: NodeJS.Timeout;
     private _streamTime: number = null;
     private _essMap = new Map<number, number>(); // <serviceId, pid>
     private _essEsPids = new Set<number>();
@@ -374,6 +373,9 @@ export default class TSFilter extends EventEmitter {
                     packet.copy(this._patCRC, 0, targetStart, targetStart + 4);
                     parsingBuffers.push(packet);
                 }
+            } else if (pid === this._pmtPid) {
+                // Apply PMT changes before filtering subsequent packets in this chunk.
+                this._parser.write([packet]);
             } else if (
                 (pid === 0x12 && (this._parseEIT || this._provideEventId !== null)) ||
                 pid === 0x14 ||
@@ -460,6 +462,8 @@ export default class TSFilter extends EventEmitter {
             // detect PMT PID by specific service id
             if (serviceId === this._provideServiceId) {
                 if (this._pmtPid !== program.program_map_PID) {
+                    this._parsePids.delete(this._pmtPid);
+                    this._providePids = new Set(PROVIDE_PIDS);
                     this._pmtPid = program.program_map_PID;
 
                     if (this._providePids.has(this._pmtPid) === false) {
@@ -537,28 +541,34 @@ export default class TSFilter extends EventEmitter {
             return;
         }
 
-        if (this._ready === false && this._provideServiceId !== null && this._provideEventId === null) {
-            this._ready = true;
-
-            log.info("TSFilter#_onPMT: now ready for serviceId=%d", this._provideServiceId);
+        if (pid !== this._pmtPid || data.program_number !== this._provideServiceId ||
+            data.current_next_indicator !== 1) {
+            return;
         }
 
-        if (data.program_info[0]) {
-            this._providePids.add(data.program_info[0].CA_PID);
+        // A PMT is the complete current PID set, not an incremental update.
+        const providePids = new Set(PROVIDE_PIDS);
+        providePids.add(pid);
+        providePids.add(data.PCR_PID);
+
+        for (const descriptor of data.program_info) {
+            if (descriptor.descriptor_tag === 0x09) {
+                providePids.add(descriptor.CA_PID);
+            }
         }
-
-        this._providePids.add(data.PCR_PID);
-
         for (const stream of data.streams) {
-            this._providePids.add(stream.elementary_PID);
+            providePids.add(stream.elementary_PID);
+            for (const descriptor of stream.ES_info) {
+                if (descriptor.descriptor_tag === 0x09) {
+                    providePids.add(descriptor.CA_PID);
+                }
+            }
         }
+        this._providePids = providePids;
 
-        // sleep
-        if (this._parsePids.has(pid)) {
-            this._parsePids.delete(pid);
-            this._pmtTimer = setTimeout(() => {
-                this._parsePids.add(pid);
-            }, 1000);
+        if (this._ready === false && this._provideEventId === null) {
+            this._ready = true;
+            log.info("TSFilter#_onPMT: now ready for serviceId=%d", this._provideServiceId);
         }
     }
 
@@ -1045,7 +1055,6 @@ export default class TSFilter extends EventEmitter {
         this._closed = true;
 
         // clear timer
-        clearTimeout(this._pmtTimer);
         clearTimeout(this._provideEventTimeout);
         clearTimeout(this._logoDataTimer);
 
