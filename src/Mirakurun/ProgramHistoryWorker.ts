@@ -163,7 +163,7 @@ function gguideBytes(): number {
         Number(database.prepare("SELECT COALESCE(SUM(length(data)),0) AS bytes FROM gguide_modules").get().bytes);
     const metadata = Number(database.prepare("SELECT COALESCE(SUM(length(metadata_json)),0) AS bytes FROM gguide_assets").get().bytes) +
         Number(database.prepare("SELECT COALESCE(SUM(length(binding_json)),0) AS bytes FROM gguide_bindings").get().bytes);
-    const index = database.prepare("SELECT length(value) AS bytes FROM metadata WHERE key='gguide-state'").get();
+    const index = database.prepare("SELECT length(CAST(value AS BLOB)) AS bytes FROM metadata WHERE key='gguide-state'").get();
     return blobs + metadata + Number(index?.bytes || 0);
 }
 

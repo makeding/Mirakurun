@@ -23,7 +23,7 @@ export const get: Operation = async (req, res, next) => {
 get.apiDoc = {
     tags: ["gguide"], operationId: "getGGuideAssets",
     responses: {
-        200: { description: "Extracted materials; display eligibility remains unknown", schema: {
+        200: { description: "All collected images and their channel associations", schema: {
             type: "array", items: { $ref: "#/definitions/GGuideAsset" }
         } },
         default: { description: "Error", schema: { $ref: "#/definitions/Error" } }

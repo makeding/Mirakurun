@@ -18,6 +18,7 @@ import { join } from "path";
 import * as apid from "../../api";
 import { Program } from "./db";
 import { rejectWhere } from "./common";
+import type { GGuideIndexFact } from "./GGuideProgramIndex";
 
 export interface HistoryMutation {
     program: Program;
@@ -34,8 +35,6 @@ export interface HistoryOptions {
     retentionDays: number;
     onFailure?: (error: Error) => void;
 }
-
-import type { GGuideIndexFact } from "./GGuideProgramIndex";
 
 export interface GGuideStorageState {
     enabled?: boolean;

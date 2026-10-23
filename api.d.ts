@@ -494,7 +494,7 @@ export interface Status {
     };
 }
 
-/** Extracted broadcast material. Display eligibility is not yet decoded. */
+/** Collected broadcast image and its explicit channel associations. */
 export interface GGuideSource {
     channelType: ChannelType;
     channel: string;
