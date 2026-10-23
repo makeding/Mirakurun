@@ -173,7 +173,7 @@ export default class GGuideStore {
         for (const binding of bindings) {
             const previous = next.bindings.find(item => item.id === binding.id);
             if (!previous) { next.bindings.push(structuredClone(binding)); continue; }
-            const members = binding.kind === "obj12" ? mergeMembers(previous.members, binding.members) : structuredClone(binding.members);
+            const members = binding.kind === "pap" ? structuredClone(binding.members) : mergeMembers(previous.members, binding.members);
             Object.assign(previous, binding, { firstReceivedAt: Math.min(previous.firstReceivedAt, binding.firstReceivedAt), members });
         }
         next.lastCollection = result;

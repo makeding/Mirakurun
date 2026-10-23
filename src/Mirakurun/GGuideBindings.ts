@@ -14,6 +14,8 @@ export type GGuideBindingRole = "top" | "detailImage" | "detailText" | "topAnima
 
 export interface GGuideBindingMember {
     role: GGuideBindingRole;
+    /** Receiver object identity for a NAP member received in a separate module. */
+    objectId?: number;
     assetId?: string;
     uri?: string;
     mimeType?: string;
@@ -127,7 +129,21 @@ function parseNAP(record: GGuideBindingRecord): GGuideBinding | undefined {
         const role = /net_top_img1\.jpg$/.test(uri) ? "top" : /net_detail_img\.jpg$/.test(uri) ? "detailImage" :
             /net_detail_txt\.gss$/.test(uri) ? "detailText" : /netani_\d+\.zip$/.test(uri) ? "topAnimation" : undefined;
         if (!role) { continue; }
-        members.push({ role, uri });
+        // The five retained NAP/f8 package pairs establish this numbering for
+        // NAP's separately delivered 0xf8 members. It is an object reference
+        // rather than a role inferred from image dimensions.
+        if (role === "top") {
+            members.push({ role, uri, objectId: objectId * 10, order: 0 });
+        } else if (role === "detailImage") {
+            members.push({ role, uri, objectId: objectId * 10 + 3 });
+        } else if (role === "detailText") {
+            members.push({ role, uri, objectId: objectId * 10 + 2 });
+        } else {
+            // An animation archive has two separately broadcast JPEG frames.
+            members.push({ role, uri });
+            members.push({ role: "top", objectId: objectId * 10, order: 0 });
+            members.push({ role: "top", objectId: objectId * 10 + 1, order: 1 });
+        }
     }
     if (members.length === 0) { return; }
     return { kind: "nap", objectId, members, startRaw: identity.payload.readUInt32BE(4), endRaw: identity.payload.readUInt32BE(8), rawControls: identity.payload.subarray(12).toString("hex") };
@@ -136,7 +152,7 @@ function parseNAP(record: GGuideBindingRecord): GGuideBinding | undefined {
 function parsePAP(record: GGuideBindingRecord): GGuideBinding | undefined {
     const entries = tlvs(record.plaintext, 5);
     const identity = entries.find(item => item.tag === 1);
-    if (!identity || identity.payload.length < 12) { return; }
+    if (!identity || identity.payload.length < 16) { return; }
     const members = record.assets.filter(asset => asset.mimeType === "image/png").sort((a, b) => a.imageOffset - b.imageOffset)
         .map((asset, order) => ({ role: "frame" as const, assetId: assetId(asset), mimeType: asset.mimeType, imageOffset: asset.imageOffset, order }));
     if (members.length === 0) { return; }
@@ -153,6 +169,39 @@ function parseMM(record: GGuideBindingRecord): GGuideBinding | undefined {
     const members = record.assets.map((asset, order) => ({ role: "media" as const, assetId: assetId(asset), mimeType: asset.mimeType, imageOffset: asset.imageOffset, order }));
     if (members.length === 0) { return; }
     return { kind: "obj12", objectId, members, rawControls: identity.payload.subarray(4).toString("hex") };
+}
+
+/**
+ * Parses local NAP material.  The observed f8 form identifies the material
+ * with tag 1's object ID, its end validity with tag 2, and its receiver file
+ * name in tag 3.  Only the four retained names plus matching object slots are
+ * assigned a placement role; all other f8 records remain unbound.  f8 is NAP
+ * material, not OBJ12: its parent ad is its object ID divided by ten.
+ */
+function parseF8(record: GGuideBindingRecord): GGuideBinding | undefined {
+    const entries = tlvs(record.plaintext, 3);
+    const identity = entries.find(item => item.tag === 1);
+    const validity = entries.find(item => item.tag === 2);
+    if (!identity || identity.payload.length < 8 || !validity || validity.payload.length < 4) { return; }
+    const objectId = identity.payload.readUInt32BE(0);
+    const slot = objectId % 10;
+    const text = record.plaintext.toString("latin1");
+    const name = /(?:^|[^A-Za-z0-9_.-])(top1\.jpg|top2\.jpg|detail\.jpg|detail\.gss)(?:\x00|$)/.exec(text)?.[1];
+    const role = name === "top1.jpg" && slot === 0 ? "top" :
+        name === "top2.jpg" && slot === 1 ? "top" :
+            name === "detail.jpg" && slot === 3 ? "detailImage" :
+                name === "detail.gss" && slot === 2 ? "detailText" : undefined;
+    if (!role) { return; }
+    const members: GGuideBindingMember[] = record.assets.map((asset, order) => ({
+        role, objectId, assetId: assetId(asset), mimeType: asset.mimeType, imageOffset: asset.imageOffset,
+        order: role === "top" ? slot : order,
+    }));
+    // detail.gss is received local material as well but is not an image asset.
+    if (members.length === 0) {
+        members.push(role === "top" ? { role, objectId, order: slot } : { role, objectId });
+    }
+    return { kind: "nap", objectId: Math.floor(objectId / 10), members, startRaw: identity.payload.readUInt32BE(4),
+        endRaw: validity.payload.readUInt32BE(0), rawControls: identity.payload.subarray(8).toString("hex") };
 }
 
 function parseOBJ12Index(record: GGuideBindingRecord): GGuideBinding[] {
@@ -185,7 +234,7 @@ function parseOBJ12Index(record: GGuideBindingRecord): GGuideBinding[] {
 export function parseGGuideBindings(records: GGuideBindingRecord[]): GGuideBinding[] {
     const bindings: GGuideBinding[] = [];
     for (const record of records) {
-        const binding = record.type === 0xf9 ? parseNAP(record) : record.type === 0x56 ? parsePAP(record) : record.type === 0xf5 ? parseMM(record) : undefined;
+        const binding = record.type === 0xf9 ? parseNAP(record) : record.type === 0x56 ? parsePAP(record) : record.type === 0xf5 ? parseMM(record) : record.type === 0xf8 ? parseF8(record) : undefined;
         if (binding) { bindings.push(binding); }
         if (record.type === 0xdf) { bindings.push(...parseOBJ12Index(record)); }
     }

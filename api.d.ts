@@ -528,6 +528,7 @@ export interface GGuideAsset {
 }
 
 export interface GGuideBindingMember {
+    objectId?: number;
     role: "top" | "detailImage" | "detailText" | "topAnimation" | "frame" | "media";
     assetId?: string;
     uri?: string;

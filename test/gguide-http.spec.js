@@ -128,7 +128,8 @@ process.stdout.on("error",()=>process.exit(0));
         const assets = await json("/gguide/assets");
         assert.ok(assets.length > 10, `Expected real images, got ${assets.length}`);
         const bindings = await json("/gguide/bindings");
-        assert.ok(bindings.some(binding => binding.kind === "nap"));
+        assert.ok(bindings.some(binding => binding.kind === "nap" && binding.members.some(member => member.role === "top" && member.assetId)));
+        assert.ok(bindings.some(binding => binding.kind === "nap" && binding.members.some(member => member.role === "detailImage" && member.assetId && member.uri)));
         assert.ok(bindings.some(binding => binding.kind === "pap"));
         assert.ok(bindings.some(binding => binding.kind === "obj12" && binding.members.some(member => member.assetId && member.uri)));
         for (const binding of bindings) {

@@ -1064,6 +1064,8 @@ definitions:
     type: object
     required: [role]
     properties:
+      objectId:
+        type: integer
       role:
         type: string
         enum: [top, detailImage, detailText, topAnimation, frame, media]

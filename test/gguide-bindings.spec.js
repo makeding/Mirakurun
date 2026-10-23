@@ -49,9 +49,44 @@ test("binds NAP URLs to receiver-proven top/detail member roles", () => {
         Buffer.from("http://nad.example/nad/730133/net_top_img1.jpg\0http://nad.example/nad/730133/net_detail_img.jpg\0http://nad.example/nad/730133/net_detail_txt.gss\0", "latin1")]);
     const [binding] = parseGGuideBindings([{ type: 0xf9, plaintext: plain, assets: [] }]);
     assert.deepEqual(binding, { kind: "nap", objectId: 730133, startRaw: 10, endRaw: 20, rawControls: "000000000000",
-        members: [{ role: "top", uri: "http://nad.example/nad/730133/net_top_img1.jpg" },
-            { role: "detailImage", uri: "http://nad.example/nad/730133/net_detail_img.jpg" },
-            { role: "detailText", uri: "http://nad.example/nad/730133/net_detail_txt.gss" }] });
+        members: [{ role: "top", uri: "http://nad.example/nad/730133/net_top_img1.jpg", objectId: 7301330, order: 0 },
+            { role: "detailImage", uri: "http://nad.example/nad/730133/net_detail_img.jpg", objectId: 7301333 },
+            { role: "detailText", uri: "http://nad.example/nad/730133/net_detail_txt.gss", objectId: 7301332 }] });
+});
+
+test("binds local f8 NAP material only when its object slot and receiver filename agree", () => {
+    const objectId = 7301333;
+    const identity = Buffer.alloc(12);
+    identity.writeUInt32BE(objectId, 0);
+    identity.writeUInt32BE(10, 4);
+    identity.writeUInt32BE(0x01000000, 8);
+    const end = Buffer.alloc(4);
+    end.writeUInt32BE(20);
+    const image = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
+    const plain = Buffer.concat([Buffer.from([0, 12, 0xff]), tlv(1, identity), tlv(2, end),
+        tlv(3, Buffer.concat([Buffer.from("detail.jpg\0", "latin1"), image]))]);
+    const imageOffset = plain.indexOf(image);
+    const [binding] = parseGGuideBindings([{ type: 0xf8, plaintext: plain,
+        assets: [{ data: image, mimeType: "image/jpeg", imageOffset, displayable: true }] }]);
+    assert.deepEqual(binding, { kind: "nap", objectId: 730133, startRaw: 10, endRaw: 20, rawControls: "01000000",
+        members: [{ role: "detailImage", objectId, assetId: createHash("sha256").update(image).digest("hex"),
+            mimeType: "image/jpeg", imageOffset, order: 0 }] });
+
+    const mismatch = Buffer.concat([Buffer.from([0, 12, 0xff]), tlv(1, identity), tlv(2, end), tlv(3, Buffer.from("top1.jpg\0", "latin1"))]);
+    assert.deepEqual(parseGGuideBindings([{ type: 0xf8, plaintext: mismatch, assets: [] }]), []);
+});
+
+test("keeps a NAP animation archive and its two local top-frame references distinct", () => {
+    const identity = Buffer.alloc(18);
+    identity.writeUInt32BE(730138, 0);
+    const plain = Buffer.concat([Buffer.from([0, 0, 0, 14, 0xff]), tlv(1, identity),
+        Buffer.from("http://nad.example/nad/730138/netani_730138.zip\0", "latin1")]);
+    const [binding] = parseGGuideBindings([{ type: 0xf9, plaintext: plain, assets: [] }]);
+    assert.deepEqual(binding.members, [
+        { role: "topAnimation", uri: "http://nad.example/nad/730138/netani_730138.zip" },
+        { role: "top", objectId: 7301380, order: 0 },
+        { role: "top", objectId: 7301381, order: 1 },
+    ]);
 });
 
 test("adds a verified PAP external palette and keeps ordered frame bindings", () => {
