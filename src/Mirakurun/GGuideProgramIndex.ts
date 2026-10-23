@@ -8,9 +8,11 @@
        http://www.apache.org/licenses/LICENSE-2.0
 */
 import * as apid from "../../api";
+import { GGuideScheduleEntry, parseGGuideProgramSchedule } from "./GGuideProgramSchedule";
 
 export type GGuideIndexValue =
-    { kind: "program"; id: string; gcn: number } |
+    { kind: "program"; id: string; gcn: number; programKey?: string } |
+    ({ kind: "schedule" } & GGuideScheduleEntry) |
     { kind: "media"; id: string; objectId: number } |
     { kind: "switch"; id: string } |
     { kind: "link"; id: string; from: string; to: string } |
@@ -44,7 +46,9 @@ function entries(data: Buffer, offset: number): Buffer[] {
 
 export function parseGGuideProgramIndex(type: number, metadata: Buffer, plaintext: Buffer): GGuideIndexValue[] {
     const values: GGuideIndexValue[] = [];
-    if (type === 0xf3) {
+    if (type === 0x51) {
+        values.push(...parseGGuideProgramSchedule(metadata, plaintext).map(value => ({ kind: "schedule" as const, ...value })));
+    } else if (type === 0xf3) {
         for (const entry of entries(plaintext, 0)) {
             if (entry.length < 3) { continue; }
             const gcn = entry.readUInt16BE(0);
@@ -68,7 +72,7 @@ export function parseGGuideProgramIndex(type: number, metadata: Buffer, plaintex
                 const to = entry.subarray(6, 12).toString("hex");
                 values.push({ kind: "link", id: [id, to].sort().join(":"), from: id, to });
             } else if (category <= 1000 && entry.length >= 11) {
-                values.push({ kind: "program", id, gcn: entry.readUInt16BE(6) });
+                values.push({ kind: "program", id, gcn: entry.readUInt16BE(6), programKey: entry.subarray(8, 11).toString("hex") });
             } else if (category === 1304) {
                 values.push({ kind: "switch", id });
             } else if (category === 1305 && entry.length >= 10) {
@@ -103,8 +107,15 @@ export function resolveGGuidePrograms(assets: apid.GGuideAsset[], bindings: apid
     }
     const matches = new Map<string, Map<string, apid.GGuideProgram>>();
     for (const [scope, values] of scopes) {
-        const nodes = new Map(values.filter(value => value.kind !== "link" && value.kind !== "channel").map(value => [value.id, value]));
+        const nodes = new Map(values.filter(value => value.kind !== "link" && value.kind !== "channel" && value.kind !== "schedule").map(value => [value.id, value]));
         const channels = new Map(values.filter((value): value is Extract<GGuideIndexValue, { kind: "channel" }> => value.kind === "channel").map(value => [value.gcn, value]));
+        const schedules = new Map<string, GGuideScheduleEntry[]>();
+        for (const value of values) {
+            if (value.kind !== "schedule") { continue; }
+            const key = `${value.gcn}:${value.programKey}`;
+            if (!schedules.has(key)) { schedules.set(key, []); }
+            schedules.get(key).push(value);
+        }
         const links = new Map<string, Set<string>>();
         for (const value of values) {
             if (value.kind !== "link") { continue; }
@@ -132,9 +143,14 @@ export function resolveGGuidePrograms(assets: apid.GGuideAsset[], bindings: apid
                         for (const member of binding.members) {
                             if (!member.assetId) { continue; }
                             if (!matches.has(member.assetId)) { matches.set(member.assetId, new Map()); }
-                            matches.get(member.assetId).set(JSON.stringify([channel.networkId, channel.serviceId, program.id]), {
-                                programGgid: program.id, networkId: channel.networkId, serviceId: channel.serviceId
-                            });
+                            const events = schedules.get(`${program.gcn}:${program.programKey}`) || [];
+                            const associations: apid.GGuideProgram[] = events.length ? events.map(event => ({
+                                programGgid: program.id, networkId: channel.networkId, serviceId: channel.serviceId,
+                                name: event.name, startAt: event.startAt, duration: event.duration
+                            })) : [{ programGgid: program.id, networkId: channel.networkId, serviceId: channel.serviceId }];
+                            for (const association of associations) {
+                                matches.get(member.assetId).set(JSON.stringify([channel.networkId, channel.serviceId, program.id, association.startAt]), association);
+                            }
                         }
                     }
                 }

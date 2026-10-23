@@ -1027,10 +1027,13 @@ definitions:
       channelName:
         type: string
       name:
+        description: ARIB program title from the explicitly associated private SI entry, when received
         type: string
       startAt:
+        description: Broadcast start time in Unix milliseconds, when received
         type: integer
       duration:
+        description: Duration in milliseconds, derived from the next SI boundary when present
         type: integer
 
   GGuideCollectionResult:
