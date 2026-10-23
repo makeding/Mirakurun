@@ -526,6 +526,11 @@ export interface GGuideProgram {
     name?: string;
     startAt?: number;
     duration?: number;
+    programId?: ProgramId;
+    eventId?: EventId;
+    description?: string;
+    extended?: Program["extended"];
+    program?: Program;
 }
 
 export interface GGuideAsset {

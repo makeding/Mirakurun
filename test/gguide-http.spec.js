@@ -65,7 +65,7 @@ process.stdout.on("error",()=>process.exit(0));
         await _.program?.history?.close();
         const history = new ProgramHistory({ path: path.join(root, name + ".sqlite"), integrity: "validation", retentionDays: 365 });
         await history.open();
-        _.program = { history };
+        _.program = { history, itemMap: new Map() };
     };
     await openHistory("store");
     let server;

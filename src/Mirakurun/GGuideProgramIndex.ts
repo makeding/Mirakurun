@@ -109,12 +109,11 @@ export function resolveGGuidePrograms(assets: apid.GGuideAsset[], bindings: apid
     for (const [scope, values] of scopes) {
         const nodes = new Map(values.filter(value => value.kind !== "link" && value.kind !== "channel" && value.kind !== "schedule").map(value => [value.id, value]));
         const channels = new Map(values.filter((value): value is Extract<GGuideIndexValue, { kind: "channel" }> => value.kind === "channel").map(value => [value.gcn, value]));
-        const schedules = new Map<string, GGuideScheduleEntry[]>();
+        const schedules = new Map<string, GGuideScheduleEntry>();
         for (const value of values) {
             if (value.kind !== "schedule") { continue; }
             const key = `${value.gcn}:${value.programKey}`;
-            if (!schedules.has(key)) { schedules.set(key, []); }
-            schedules.get(key).push(value);
+            schedules.set(key, value);
         }
         const links = new Map<string, Set<string>>();
         for (const value of values) {
@@ -143,14 +142,12 @@ export function resolveGGuidePrograms(assets: apid.GGuideAsset[], bindings: apid
                         for (const member of binding.members) {
                             if (!member.assetId) { continue; }
                             if (!matches.has(member.assetId)) { matches.set(member.assetId, new Map()); }
-                            const events = schedules.get(`${program.gcn}:${program.programKey}`) || [];
-                            const associations: apid.GGuideProgram[] = events.length ? events.map(event => ({
+                            const event = schedules.get(`${program.gcn}:${program.programKey}`);
+                            const association: apid.GGuideProgram = event ? {
                                 programGgid: program.id, networkId: channel.networkId, serviceId: channel.serviceId,
                                 name: event.name, startAt: event.startAt, duration: event.duration
-                            })) : [{ programGgid: program.id, networkId: channel.networkId, serviceId: channel.serviceId }];
-                            for (const association of associations) {
-                                matches.get(member.assetId).set(JSON.stringify([channel.networkId, channel.serviceId, program.id, association.startAt]), association);
-                            }
+                            } : { programGgid: program.id, networkId: channel.networkId, serviceId: channel.serviceId };
+                            matches.get(member.assetId).set(JSON.stringify([channel.networkId, channel.serviceId, program.id]), association);
                         }
                     }
                 }

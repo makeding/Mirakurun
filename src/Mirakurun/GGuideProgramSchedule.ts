@@ -50,7 +50,7 @@ export function parseGGuideProgramSchedule(metadata: Buffer, data: Buffer): GGui
         const next = entries[i + 1];
         const duration = next ? ((next.readUInt16BE(0) - entry.readUInt16BE(0)) & 0xffff) * 60000 : undefined;
         const name = new TsChar(entry.subarray(8, 8 + entry[7])).decode() || undefined;
-        result.push({ id: `${gcn}:${programKey}:${startAt}`, gcn, programKey, name, startAt, duration });
+        result.push({ id: `${gcn}:${programKey}`, gcn, programKey, name, startAt, duration });
     }
     return result;
 }

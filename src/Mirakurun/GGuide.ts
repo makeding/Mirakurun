@@ -20,6 +20,7 @@ import { channelTypes } from "./common";
 import * as log from "./log";
 import GGuideStore, { GGUIDE_RETENTION_MS } from "./GGuideStore";
 import { createGGuideCapture } from "./GGuideCapture";
+import { enrichGGuideEpg } from "./GGuideEpg";
 import TSFilter from "./TSFilter";
 
 const JOB_PREFIX = "gguide:";
@@ -120,10 +121,10 @@ export default class GGuide {
 
     list(): apid.GGuideAsset[] {
         this.assertStorage();
-        return this.store.list().map(asset => ({ ...asset, programs: asset.programs.map(program => {
+        return enrichGGuideEpg(this.store.list().map(asset => ({ ...asset, programs: asset.programs.map(program => {
             const service = _.service.items.find(item => item.networkId === program.networkId && item.serviceId === program.serviceId);
             return { ...program, channelName: service?.name };
-        }) }));
+        }) })), _.program.itemMap.values());
     }
 
     bindings(): apid.GGuideBinding[] {

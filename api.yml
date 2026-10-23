@@ -1035,6 +1035,23 @@ definitions:
       duration:
         description: Duration in milliseconds, derived from the next SI boundary when present
         type: integer
+      programId:
+        description: Mirakurun program ID from a unique exact service/start schedule match, with matching duration when known; absent if unmatched or ambiguous
+        type: integer
+      eventId:
+        description: Actual EIT event ID of the matched Mirakurun program, not derived from the private GGID
+        type: integer
+      description:
+        description: Summary from the matched EPG program
+        type: string
+      extended:
+        description: Detailed description sections from the matched EPG program
+        type: object
+        additionalProperties:
+          type: string
+      program:
+        description: Complete current public EPG program, including IDs, description and all available metadata; absent if unmatched or ambiguous
+        $ref: '#/definitions/Program'
 
   GGuideCollectionResult:
     type: object
