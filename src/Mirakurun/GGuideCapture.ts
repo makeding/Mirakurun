@@ -18,6 +18,8 @@ import { GGuideMaterial, digest } from "./GGuideStore";
 import { decodeGGuideModule } from "./GGuideDecoder";
 import { GGuideCarousel } from "./GGuideCarousel";
 
+import { GGuideIndexFact, gguideScope } from "./GGuideProgramIndex";
+
 const MAX_STAGED_BYTES = 64 * 1024 * 1024;
 
 /** Bounded decoder staging shared by scheduled, manual and passive reception. */
@@ -27,6 +29,7 @@ export function createGGuideCapture(request: apid.GGuideCollectionRequest, paylo
     const modules = new Map<string, Buffer>();
     const bindings: apid.GGuideBinding[] = [];
     const seen = new Set<string>();
+    const programIndex = new Map<string, GGuideIndexFact>();
     let stagedBytes = 0;
     const carousel = new GGuideCarousel({ serviceId: request.serviceId, onModule: module => {
         const moduleHash = digest(module.data);
@@ -36,6 +39,14 @@ export function createGGuideCapture(request: apid.GGuideCollectionRequest, paylo
         if (seen.size > 8192) { throw new Error("GGuide module count limit exceeded"); }
         const decoded = decodeGGuideModule(module.data, context);
         const receivedAt = Date.now();
+        const scope = gguideScope({ ...request, serviceId: module.serviceId });
+        for (const value of decoded.programIndex) {
+            const id = JSON.stringify([scope, value.kind, value.id]);
+            const fact = { scope, value, receivedAt };
+            const prior = programIndex.get(id);
+            stagedBytes += Buffer.byteLength(JSON.stringify(fact)) - (prior ? Buffer.byteLength(JSON.stringify(prior)) : 0);
+            programIndex.set(id, fact);
+        }
         for (const binding of decoded.bindings) {
             const id = digest(Buffer.from(JSON.stringify([request.channelType, request.channel, module.serviceId, binding.kind, binding.objectId])));
             stagedBytes += Buffer.byteLength(JSON.stringify(binding));
@@ -72,5 +83,5 @@ export function createGGuideCapture(request: apid.GGuideCollectionRequest, paylo
         }
         if (stagedBytes > MAX_STAGED_BYTES) { throw new Error("GGuide collection memory budget exhausted"); }
     } });
-    return { materials, modules, bindings, seen, carousel };
+    return { materials, modules, bindings, programIndex, seen, carousel };
 }

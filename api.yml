@@ -1001,6 +1001,32 @@ definitions:
         items:
           $ref: '#/definitions/GGuideSource'
 
+      programs:
+        description: Explicit broadcast program associations; empty when unknown
+        type: array
+        items:
+          $ref: '#/definitions/GGuideProgram'
+
+  GGuideProgram:
+    type: object
+    required: [programGgid, networkId, serviceId]
+    properties:
+      programGgid:
+        description: GGuide private program identity, not an ARIB event ID
+        type: string
+      networkId:
+        type: integer
+      serviceId:
+        type: integer
+      channelName:
+        type: string
+      name:
+        type: string
+      startAt:
+        type: integer
+      duration:
+        type: integer
+
   GGuideCollectionResult:
     type: object
     properties:

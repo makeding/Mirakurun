@@ -120,7 +120,10 @@ export default class GGuide {
 
     list(): apid.GGuideAsset[] {
         this.assertStorage();
-        return this.store.list();
+        return this.store.list().map(asset => ({ ...asset, programs: asset.programs.map(program => {
+            const service = _.service.items.find(item => item.networkId === program.networkId && item.serviceId === program.serviceId);
+            return { ...program, channelName: service?.name };
+        }) }));
     }
 
     bindings(): apid.GGuideBinding[] {
@@ -235,16 +238,16 @@ export default class GGuide {
         session.capture.carousel.close();
         session.queue = [];
         this.passiveCooldown.set(targetKey(session.request), Date.now() + 6 * 60 * 60 * 1000);
-        const { materials, modules, bindings, seen } = session.capture;
+        const { materials, modules, bindings, programIndex, seen } = session.capture;
         if (error) {
             void session.stopPublishing();
             log.warn("GGuide passive observation stopped: %s", error.message);
             return;
         }
-        if (!materials.size && !bindings.length) { void session.stopPublishing(); return; }
+        if (!materials.size && !bindings.length && !programIndex.size) { void session.stopPublishing(); return; }
         const result: apid.GGuideCollectionResult = { ...session.request, startedAt: session.startedAt,
             finishedAt: Date.now(), status: "completed", assetCount: materials.size, moduleCount: seen.size };
-        const save = session.stopPublishing().then(() => this.store.save([...materials.values()], modules, result, bindings))
+        const save = session.stopPublishing().then(() => this.store.save([...materials.values()], modules, result, bindings, [...programIndex.values()]))
             .then(() => { this.lastResult = result; })
             .catch(err => { log.error("GGuide passive save failed: %s", err.message); })
             .finally(() => this.pendingSaves.delete(save));
@@ -255,13 +258,13 @@ export default class GGuide {
         let published = 0;
         let pending: Promise<void>;
         const timer = setInterval(() => {
-            if (pending || published === capture.seen.size || (!capture.materials.size && !capture.bindings.length)) { return; }
+            if (pending || published === capture.seen.size || (!capture.materials.size && !capture.bindings.length && !capture.programIndex.size)) { return; }
             const revision = capture.seen.size;
             // Snapshot metadata so reception cannot mutate an in-flight publication.
             const materials = [...capture.materials.values()].map(item => ({ data: item.data, asset: structuredClone(item.asset) }));
             const modules = new Map(capture.modules);
             const bindings = structuredClone(capture.bindings);
-            const save = this.store.save(materials, modules, undefined, bindings)
+            const save = this.store.save(materials, modules, undefined, bindings, structuredClone([...capture.programIndex.values()]))
                 .then(() => { published = revision; })
                 .catch(onError)
                 .finally(() => { this.pendingSaves.delete(save); pending = undefined; });
@@ -323,7 +326,7 @@ export default class GGuide {
     private async collect(request: apid.GGuideCollectionRequest, channel: { getStream: (...args: any[]) => Promise<TSFilter> }, signal: AbortSignal): Promise<void> {
         const startedAt = Date.now();
         const decoded = createGGuideCapture(request, this.decodeBytes, this.preserveModules);
-        const { materials, modules, bindings, seen, carousel } = decoded;
+        const { materials, modules, bindings, programIndex, seen, carousel } = decoded;
         let filter: TSFilter;
         let timer: NodeJS.Timeout;
         let idleTimer: NodeJS.Timeout;
@@ -381,12 +384,12 @@ export default class GGuide {
             await stopPublishing();
             signal.throwIfAborted();
             if (!request.serviceId && !carousel.selectedServiceId) { return; }
-            if (!materials.size && !bindings.length) {
+            if (!materials.size && !bindings.length && !programIndex.size) {
                 throw new Error("No GGuide materials or bindings received; check service, key and capture window");
             }
             const result: apid.GGuideCollectionResult = { ...request, startedAt, finishedAt: Date.now(),
                 status: "completed", assetCount: materials.size, moduleCount: seen.size };
-            await this.store.save([...materials.values()], modules, result, bindings);
+            await this.store.save([...materials.values()], modules, result, bindings, [...programIndex.values()]);
             this.lastResult = result;
         } catch (err) {
             this.lastResult = { ...request, startedAt, finishedAt: Date.now(),
@@ -398,6 +401,7 @@ export default class GGuide {
             carousel.close();
             await stopPublishing();
             materials.clear();
+            programIndex.clear();
             modules.clear();
         }
     }

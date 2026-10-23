@@ -23,7 +23,7 @@ import * as ui from "../modules/ui";
 import "./GGuideView.sass";
 
 function formatDate(value: number): string {
-    return DateTime.fromMillis(value).toFormat("yyyy/LL/dd HH:mm:ss");
+    return DateTime.fromMillis(value, { zone: "Asia/Tokyo", locale: "ja" }).toFormat("yyyy/LL/dd HH:mm:ss");
 }
 
 function assetName(asset: GGuideAsset): string {
@@ -59,6 +59,7 @@ export const GGuideView: React.FC = () => {
                 throw new Error("素材一覧の形式が不正です");
             }
             setAssets(nextAssets);
+            setSelected(previous => previous ? nextAssets.find(asset => asset.id === previous.id) || previous : null);
             if (resetBrokenImageState) {
                 setBrokenImages(new Set());
             }
@@ -132,9 +133,9 @@ export const GGuideView: React.FC = () => {
                                         </div> : <img src={`/api/gguide/assets/${encodeURIComponent(asset.id)}`} alt="" loading="lazy" onError={() => setBrokenImages(previous => new Set(previous).add(asset.id))} />}
                                     </div>
                                     <div className="asset-card-body">
-                                        <div className="asset-card-title">{assetName(asset)}</div>
+                                        <div className="asset-card-title">{[...new Set(asset.programs?.map(program => program.name).filter(Boolean))].join(" / ") || "番組名未取得"}</div>
                                         <div className="asset-tags">
-                                            <Tag minimal intent={asset.displayable ? "success" : "warning"}>{asset.displayable ? "表示可能" : "未対応"}</Tag>
+                                            <span>{[...new Set(asset.programs?.map(program => program.channelName).filter(Boolean))].join(" / ") || "放送局未取得"}</span>
 
                                         </div>
                                         <div className="asset-meta">{formatDate(asset.lastReceivedAt)}</div>
@@ -157,6 +158,11 @@ export const GGuideView: React.FC = () => {
                                 : <div className="thumbnail-unavailable"><span className="bp5-icon bp5-icon-media" />{selected.unsupportedReason === "missing-palette" ? "外部パレットが未取得です" : "この素材はプレビューできません"}</div>}
                         </div>
                         <table className="bp5-html-table bp5-html-table-condensed asset-details"><tbody>
+                            <tr><th>番組</th><td>{selected.programs?.length ? selected.programs.map(program => <div key={`${program.networkId}:${program.serviceId}:${program.programGgid}`} className="asset-program">
+                                <strong>{program.channelName || "放送局名未取得"}</strong>
+                                <div>{program.name || "番組名未取得"}</div>
+                                {program.startAt !== undefined && <div>{formatDate(program.startAt)}{program.duration !== undefined && ` — ${formatDate(program.startAt + program.duration)}`}</div>}
+                            </div>) : "未取得"}</td></tr>
                             <tr><th>形式</th><td>{selected.mimeType} ({selected.width} × {selected.height}, {selected.size.toLocaleString()} bytes)</td></tr>
                             <tr><th>受信</th><td>{formatDate(selected.firstReceivedAt)} — {formatDate(selected.lastReceivedAt)}</td></tr>
                         </tbody></table>

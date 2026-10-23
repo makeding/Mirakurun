@@ -56,7 +56,10 @@ process.stdout.on("error",()=>process.exit(0));
     _.job = new Job();
     _.tuner = new Tuner();
     _.channel = new Channel();
-    _.service = { items: [], findByChannel: () => [] };
+    _.service = { items: [
+        { networkId: 32722, serviceId: 2064, name: "ＭＢＳ" },
+        { networkId: 32086, serviceId: 43056, name: "サンテレビ１" }
+    ], findByChannel: () => [] };
     const { ProgramHistory } = require("../lib/Mirakurun/ProgramHistory");
     const openHistory = async name => {
         await _.program?.history?.close();
@@ -118,6 +121,14 @@ process.stdout.on("error",()=>process.exit(0));
         assert.equal(done.hasFailed, false, done.error);
         const assets = await json("/gguide/assets");
         assert.ok(assets.length > 10, `Expected real images, got ${assets.length}`);
+        const mappedExamples = [
+            ["0cca06e34fbb53699ef2ec3c438a60e1c25e1d476bf6b05654a5a77de5ff4a4d", "e1040000abd4", 32722, 2064, "ＭＢＳ"],
+            ["d8a0827f3908eecaf52cf4b2b74ff860ffd247754f0946a9a27cfc5da81e15b6", "f50c00000f63", 32086, 43056, "サンテレビ１"]
+        ];
+        for (const [id, programGgid, networkId, serviceId, channelName] of mappedExamples) {
+            assert.deepEqual(assets.find(asset => asset.id === id)?.programs,
+                [{ programGgid, networkId, serviceId, channelName }]);
+        }
         const bindings = await json("/gguide/bindings");
         assert.ok(bindings.some(binding => binding.kind === "nap" && binding.members.some(member => member.role === "top" && member.assetId)));
         assert.ok(bindings.some(binding => binding.kind === "nap" && binding.members.some(member => member.role === "detailImage" && member.assetId && member.uri)));
@@ -181,7 +192,11 @@ process.stdout.on("error",()=>process.exit(0));
         const imagesOnlyDone = await finished(imagesOnlyJob.id);
         assert.equal(imagesOnlyDone.hasFailed, false, imagesOnlyDone.error);
         assert.equal((await _.program.history.gguideOpen(options.maxBytes)).modules.length, 0);
-        assert.ok((await json("/gguide/assets")).length > 0);
+        const imagesOnlyAssets = await json("/gguide/assets");
+        for (const [id] of mappedExamples) {
+            assert.deepEqual(imagesOnlyAssets.find(asset => asset.id === id)?.programs, assets.find(asset => asset.id === id)?.programs);
+        }
+        report.programMappings = mappedExamples.map(([id]) => ({ id, programs: assets.find(asset => asset.id === id).programs }));
         report.optionalModulePreservation = true;
         report.bindingCount = bindings.length;
         await _.gguide.close();

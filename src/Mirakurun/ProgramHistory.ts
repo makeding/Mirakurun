@@ -35,12 +35,15 @@ export interface HistoryOptions {
     onFailure?: (error: Error) => void;
 }
 
+import type { GGuideIndexFact } from "./GGuideProgramIndex";
+
 export interface GGuideStorageState {
     enabled?: boolean;
     assets: apid.GGuideAsset[];
     modules: string[];
     moduleReceivedAt: Record<string, number>;
     bindings: apid.GGuideBinding[];
+    programIndex?: GGuideIndexFact[];
     lastCollection?: apid.GGuideCollectionResult;
 }
 
@@ -54,6 +57,7 @@ export interface GGuideStorageSave {
     modules: [string, Buffer][];
     result?: apid.GGuideCollectionResult;
     bindings: apid.GGuideBinding[];
+    programIndex?: GGuideIndexFact[];
     maxBytes: number;
 }
 

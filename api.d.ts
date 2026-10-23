@@ -513,6 +513,16 @@ export interface GGuideSource {
     lastReceivedAt: number;
 }
 
+export interface GGuideProgram {
+    programGgid: string;
+    networkId: number;
+    serviceId: number;
+    channelName?: string;
+    name?: string;
+    startAt?: number;
+    duration?: number;
+}
+
 export interface GGuideAsset {
     id: string;
     mimeType: "image/png" | "image/jpeg";
@@ -525,6 +535,7 @@ export interface GGuideAsset {
     firstReceivedAt: number;
     lastReceivedAt: number;
     sources: GGuideSource[];
+    programs?: GGuideProgram[];
 }
 
 export interface GGuideBindingMember {

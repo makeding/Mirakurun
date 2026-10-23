@@ -17,6 +17,8 @@ import { createHash, createDecipheriv } from "crypto";
 import { inflateSync } from "zlib";
 import { applyGGuidePAPPalette, GGuideBinding, GGuideBindingRecord, parseGGuideBindings } from "./GGuideBindings";
 
+import { GGuideIndexValue, parseGGuideProgramIndex } from "./GGuideProgramIndex";
+
 const MAX_MODULE_BYTES = 8 * 1024 * 1024;
 const MAX_INFLATED_BYTES = 4 * 1024 * 1024;
 const MAX_DECODED_MODULE_BYTES = 32 * 1024 * 1024;
@@ -49,6 +51,7 @@ export interface GGuideDecodeResult {
     records: GGuideRecord[];
     assets: GGuideAsset[];
     bindings: GGuideBinding[];
+    programIndex: GGuideIndexValue[];
 }
 
 export class GGuideDecodeError extends Error {
@@ -290,7 +293,7 @@ export function decodeGGuideModule(data: Buffer, key: Buffer): GGuideDecodeResul
         throw new GGuideDecodeError("GGuide DES key must be exactly 8 bytes");
     }
     if (data.length < 28 || data.readUInt16BE(0) !== 14 || !/^[A-Z0-9]{11}$/.test(data.subarray(4, 15).toString("ascii"))) {
-        return { records: [], assets: [], bindings: [] };
+        return { records: [], assets: [], bindings: [], programIndex: [] };
     }
     if (data.readUInt16BE(16) !== 0x0d7f) {
         throw new GGuideDecodeError("Invalid GGuide module prefix");
@@ -299,6 +302,7 @@ export function decodeGGuideModule(data: Buffer, key: Buffer): GGuideDecodeResul
     const records: GGuideRecord[] = [];
     const assets: GGuideAsset[] = [];
     const bindingRecords: GGuideBindingRecord[] = [];
+    const programIndex: GGuideIndexValue[] = [];
     let offset = 28;
     let decodedBytes = 0;
     while (offset < data.length) {
@@ -349,13 +353,14 @@ export function decodeGGuideModule(data: Buffer, key: Buffer): GGuideDecodeResul
             plaintextSha256: createHash("sha256").update(plaintext).digest("hex"),
             assets: recordAssets
         };
+        programIndex.push(...parseGGuideProgramIndex(record.type, Buffer.from(record.metadataHex, "hex"), plaintext));
         records.push(record);
         bindingRecords.push({ type: record.type, plaintext, assets: recordAssets });
         assets.push(...recordAssets);
         offset = end;
     }
     const bindings = parseGGuideBindings(bindingRecords);
-    return { moduleName, records, assets, bindings };
+    return { moduleName, records, assets, bindings, programIndex };
 }
 
 export const GGuideDecoderLimits = { MAX_MODULE_BYTES, MAX_INFLATED_BYTES, MAX_DECODED_MODULE_BYTES };

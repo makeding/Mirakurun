@@ -25,6 +25,7 @@ import { Program } from "./db";
 import type { GGuideStorageSave, GGuideStorageState, HistoryMutation, HistoryOptions } from "./ProgramHistory";
 import sift from "sift";
 import { rejectWhere } from "./common";
+import { mergeGGuideIndex } from "./GGuideProgramIndex";
 import { mergeMembers } from "./GGuideStore";
 
 const DAY = 86400000;
@@ -162,7 +163,8 @@ function gguideBytes(): number {
         Number(database.prepare("SELECT COALESCE(SUM(length(data)),0) AS bytes FROM gguide_modules").get().bytes);
     const metadata = Number(database.prepare("SELECT COALESCE(SUM(length(metadata_json)),0) AS bytes FROM gguide_assets").get().bytes) +
         Number(database.prepare("SELECT COALESCE(SUM(length(binding_json)),0) AS bytes FROM gguide_bindings").get().bytes);
-    return blobs + metadata;
+    const index = database.prepare("SELECT length(value) AS bytes FROM metadata WHERE key='gguide-state'").get();
+    return blobs + metadata + Number(index?.bytes || 0);
 }
 
 function gguideOpen(data: { maxBytes: number }): GGuideStorageState {
@@ -204,6 +206,7 @@ function gguideSave(save: GGuideStorageSave): GGuideStorageState {
             database.prepare("INSERT OR REPLACE INTO gguide_bindings(id,binding_json,last_received_at) VALUES (?,?,?)")
                 .run(next.id, JSON.stringify(next), next.lastReceivedAt);
         }
+        state.programIndex = mergeGGuideIndex(state.programIndex || [], save.programIndex || [], Date.now() - GGUIDE_RETENTION_MS);
         if (save.result) { state.lastCollection = save.result; }
         putGGuideState(state);
         if (gguideBytes() > save.maxBytes) { throw new QueryError("GGuide storage budget exhausted"); }
@@ -221,7 +224,10 @@ function gguidePrune(now: number): GGuideStorageState {
     database.prepare("DELETE FROM gguide_assets WHERE last_received_at<=?").run(cutoff);
     database.prepare("DELETE FROM gguide_modules WHERE received_at<=?").run(cutoff);
     database.prepare("DELETE FROM gguide_bindings WHERE last_received_at<=?").run(cutoff);
-    return gguideState();
+    const state = gguideState();
+    state.programIndex = mergeGGuideIndex(state.programIndex || [], [], cutoff);
+    putGGuideState(state);
+    return state;
 }
 
 function gguideRead(id: string): { asset: apid.GGuideAsset; data: Buffer } | null {

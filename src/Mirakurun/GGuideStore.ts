@@ -17,6 +17,8 @@ import { createHash } from "crypto";
 import * as apid from "../../api";
 import type { GGuideStorageState, ProgramHistory } from "./ProgramHistory";
 
+import { GGuideIndexFact, resolveGGuidePrograms } from "./GGuideProgramIndex";
+
 export interface GGuideMaterial {
     asset: apid.GGuideAsset;
     data: Buffer;
@@ -42,7 +44,9 @@ export default class GGuideStore {
 
     list(): apid.GGuideAsset[] {
         this.assertReady();
-        return structuredClone(this.state.assets.filter(asset => asset.lastReceivedAt > Date.now() - GGUIDE_RETENTION_MS));
+        const cutoff = Date.now() - GGUIDE_RETENTION_MS;
+        return resolveGGuidePrograms(structuredClone(this.state.assets.filter(asset => asset.lastReceivedAt > cutoff)),
+            this.bindings(), (this.state.programIndex || []).filter(fact => fact.receivedAt > cutoff));
     }
 
     bindings(): apid.GGuideBinding[] {
@@ -60,9 +64,9 @@ export default class GGuideStore {
     }
 
     async save(materials: GGuideMaterial[], modules: Map<string, Buffer>, result: apid.GGuideCollectionResult | undefined,
-        bindings: apid.GGuideBinding[] = []): Promise<void> {
+        bindings: apid.GGuideBinding[] = [], programIndex: GGuideIndexFact[] = []): Promise<void> {
         return this.exclusive(async () => this.apply(await this.history.gguideSave({
-            materials, modules: [...modules], result, bindings, maxBytes: this.maxBytes
+            materials, modules: [...modules], result, bindings, programIndex, maxBytes: this.maxBytes
         })));
     }
 
