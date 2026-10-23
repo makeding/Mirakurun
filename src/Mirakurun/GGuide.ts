@@ -62,6 +62,7 @@ export default class GGuide {
     get status(): apid.GGuideStatus {
         return {
             available: this.initialized && !!this.key && !this.shutdown.signal.aborted,
+            enabled: this.store.enabled,
             keyConfigured: !!this.key,
             collecting: this.isCollecting(),
             preserveModules: this.preserveModules,
@@ -91,6 +92,7 @@ export default class GGuide {
                     key: "gguide:scheduled", name: "GGuide Gatherer", isRerunnable: false,
                     retryOnAbort: false, retryOnFail: false,
                     fn: async ({ signal }) => {
+                        if (!this.store.enabled) { return; }
                         if (!this.key || this.shutdown.signal.aborted) { throw new Error("GGuide decoder unavailable"); }
                         if (this.active) { throw new Error("A GGuide collection is already running"); }
                         for (const [id, session] of this.passive) { this.finishPassive(id, session); }
@@ -113,6 +115,18 @@ export default class GGuide {
         }
     }
 
+    async setEnabled(enabled: boolean): Promise<void> {
+        this.assertStorage();
+        await this.store.setEnabled(enabled);
+        if (!enabled) {
+            for (const job of _.job.jobs) {
+                if (job.key.startsWith(JOB_PREFIX) && job.status !== "finished") { _.job.abort(job.id, "GGuide disabled"); }
+            }
+            for (const [id, session] of this.passive) { this.finishPassive(id, session); }
+            await this.active?.catch(() => undefined);
+        }
+    }
+
     list(): apid.GGuideAsset[] {
         this.assertStorage();
         return this.store.list();
@@ -129,6 +143,7 @@ export default class GGuide {
     }
 
     enqueue(input: unknown): apid.JobItem {
+        if (!this.store.enabled) { throw new GGuideError(409, "GGuide collection is disabled"); }
         const request = parseCollectionRequest(input);
         this.assertStorage();
         if (!this.key || this.shutdown.signal.aborted) {
@@ -154,7 +169,7 @@ export default class GGuide {
 
     /** Observe raw bytes after normal fanout; never owns or extends a tuner stream. */
     observe(tunerId: number, channel: { type: apid.ChannelType; channel: string }, chunk: Buffer): void {
-        if (!this.initialized || !this.key || !this.passiveEnabled || this.shutdown.signal.aborted || !channel) { return; }
+        if (!this.store.enabled || !this.initialized || !this.key || !this.passiveEnabled || this.shutdown.signal.aborted || !channel) { return; }
         let session = this.passive.get(tunerId);
         if (session && (session.request.channelType !== channel.type || session.request.channel !== channel.channel)) {
             this.endObservation(tunerId);

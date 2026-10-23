@@ -1028,8 +1028,11 @@ definitions:
 
   GGuideStatus:
     type: object
-    required: [available, keyConfigured, collecting, preserveModules, maxStorageBytes, assetCount]
+    required: [enabled, available, keyConfigured, collecting, preserveModules, maxStorageBytes, assetCount]
     properties:
+      enabled:
+        type: boolean
+        default: true
       retentionDays:
         type: integer
       schedule:

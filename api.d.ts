@@ -569,6 +569,7 @@ export interface GGuideCollectionResult extends GGuideCollectionRequest {
 }
 
 export interface GGuideStatus {
+    enabled: boolean;
     retentionDays: number;
     schedule?: string;
     targets: GGuideCollectionRequest[];

@@ -89,6 +89,10 @@ export class GGuideCarousel {
         });
     }
 
+    get selectedServiceId(): number | undefined {
+        return this._selectedServiceId;
+    }
+
     write(chunk: Buffer): void {
         if (this._closed) {
             throw new Error("GGuide carousel is closed");
@@ -130,10 +134,6 @@ export class GGuideCarousel {
 
     getStats(): GGuideCarouselStats {
         return { ...this.stats };
-    }
-
-    get selectedServiceId(): number | undefined {
-        return this._selectedServiceId;
     }
 
     private _moduleKey(pid: number, downloadId: number, moduleId: number, moduleVersion: number): string {

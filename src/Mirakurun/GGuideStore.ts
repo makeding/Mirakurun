@@ -20,6 +20,7 @@ import * as apid from "../../api";
 
 interface Index {
     version: 1;
+    enabled?: boolean;
     assets: apid.GGuideAsset[];
     modules: string[];
     moduleReceivedAt?: Record<string, number>;
@@ -43,6 +44,8 @@ export default class GGuideStore {
     private writer: Promise<void> = Promise.resolve();
 
     constructor(readonly directory: string, readonly maxBytes: number) {}
+
+    get enabled(): boolean { return this.index.enabled !== false; }
 
     get lastCollection(): apid.GGuideCollectionResult | undefined {
         return structuredClone(this.index.lastCollection);
@@ -132,6 +135,16 @@ export default class GGuideStore {
 
     async save(materials: GGuideMaterial[], modules: Map<string, Buffer>, result: apid.GGuideCollectionResult, bindings: apid.GGuideBinding[] = []): Promise<void> {
         return this.exclusive(() => this.publish(materials, modules, result, bindings));
+    }
+
+    async setEnabled(enabled: boolean): Promise<void> {
+        return this.exclusive(async () => {
+            this.assertReady();
+            const next = { ...this.index, enabled };
+            await writeFile(join(this.directory, "index.pending"), JSON.stringify(next));
+            await rename(join(this.directory, "index.pending"), join(this.directory, "index.json"));
+            this.index = next;
+        });
     }
 
     async flush(): Promise<void> {

@@ -34,3 +34,20 @@ get.apiDoc = {
         default: { description: "Error", schema: { $ref: "#/definitions/Error" } }
     }
 };
+
+export const put: Operation = async (req, res, next) => {
+    try {
+        if (typeof req.body?.enabled !== "boolean") { throw new GGuideError(400, "Expected enabled boolean"); }
+        await getGGuide().setEnabled(req.body.enabled);
+        await api.responseJSON(res, getGGuide().status);
+    } catch (err) { next(err); }
+};
+
+put.apiDoc = {
+    tags: ["gguide"], operationId: "setGGuideEnabled",
+    parameters: [{ in: "body", name: "body", required: true, schema: {
+        type: "object", required: ["enabled"], additionalProperties: false,
+        properties: { enabled: { type: "boolean" } }
+    } }],
+    responses: get.apiDoc.responses
+};

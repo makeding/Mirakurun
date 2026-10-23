@@ -202,9 +202,18 @@ process.stdout.on("error",()=>process.exit(0));
         report.optionalModulePreservation = true;
         report.bindingCount = bindings.length;
         await _.gguide.close();
+        _.job.close();
+        _.job = new Job();
         _.config.server.gguideDurationSeconds = 5;
         _.gguide = new GGuide({ ...options, directory: path.join(root, "automated") });
         await _.gguide.init();
+        assert.equal((await json("/gguide")).enabled, true);
+        for (const enabled of [false, true]) {
+            const response = await fetch(base + "/gguide", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ enabled }) });
+            assert.equal(response.status, 200);
+            assert.equal((await response.json()).enabled, enabled);
+            assert.equal(JSON.parse(fs.readFileSync(path.join(root, "automated/index.json"))).enabled, enabled);
+        }
         const schedules = await json("/job-schedules");
         const schedule = schedules.find(item => item.key === "gguide:scheduled");
         assert.equal(schedule.job.name, "GGuide Gatherer");
