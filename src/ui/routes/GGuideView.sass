@@ -9,10 +9,20 @@
     .bp5-dark &
       color: colors.$gray4
 
+  .collection-status
+    margin-left: 10px
+
   .content
     display: flex
     flex-direction: column
     gap: 16px
+
+  .bp5-non-ideal-state
+    position: static
+    width: 100%
+    height: auto
+    min-height: 240px
+    flex: none
 
   .fetch-error
     display: flex
@@ -28,18 +38,7 @@
     > .bp5-callout + .bp5-callout
       margin-top: 8px
 
-  .binding-error
-    display: flex
-    align-items: center
-    column-gap: 8px
-    flex-wrap: wrap
-    font-size: 12px
-
-    .bp5-button
-      margin-left: auto
-
   .material-summary,
-  .filters,
   .asset-tags
     display: flex
     align-items: center
@@ -110,43 +109,6 @@
     .bp5-dark &
       color: colors.$gray4
 
-  .binding-overview
-    padding-bottom: 24px
-
-    h3
-      margin: 8px 0 12px
-      font-size: 16px
-
-    > p
-      color: colors.$gray2
-
-      .bp5-dark &
-        color: colors.$gray4
-
-  .binding-overview-list
-    display: grid
-    grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr))
-    gap: 10px
-
-  .binding-overview-item
-    display: flex
-    flex-direction: column
-    gap: 4px
-    min-width: 0
-    font-size: 12px
-
-    > span
-      color: colors.$gray2
-
-      .bp5-dark &
-        color: colors.$gray4
-
-    ul
-      margin: 4px 0 0
-      padding-left: 18px
-
-    li
-      overflow-wrap: anywhere
 
 .asset-dialog
   width: min(760px, calc(100vw - 32px))
@@ -179,48 +141,4 @@
 
     td
       overflow-wrap: anywhere
-
-  .hash
-    font-family: monospace
-    font-size: 11px
-    overflow-wrap: anywhere
-
-  .source-list
-    display: flex
-    flex-direction: column
-    gap: 8px
-
-  .source
-    display: flex
-    flex-direction: column
-    gap: 2px
-    padding: 8px
-    border-left: 3px solid colors.$gray3
-    font-size: 12px
-
-  .binding-pending
-    margin: 18px 0 0
-    color: colors.$gray2
-    font-size: 12px
-
-    .bp5-dark &
-      color: colors.$gray4
-
-  .binding-list
-    display: flex
-    flex-direction: column
-    gap: 8px
-
-  .binding
-    display: flex
-    flex-direction: column
-    gap: 4px
-    padding: 8px
-    border-left: 3px solid colors.$blue3
-    font-size: 12px
-
-  .binding-members
-    display: flex
-    gap: 4px
-    flex-wrap: wrap
 
