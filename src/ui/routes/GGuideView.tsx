@@ -14,7 +14,7 @@
    limitations under the License.
 */
 import * as React from "react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alignment, Button, Card, Dialog, DialogBody, DialogFooter, HTMLSelect, Navbar, NonIdealState, Spinner, Switch, Tag } from "@blueprintjs/core";
 import { DateTime } from "luxon";
 import { GGuideAsset, GGuideBinding, GGuideStatus } from "../../../api.d";
@@ -47,6 +47,7 @@ export const GGuideView: React.FC = () => {
     console.debug("routes", "GGuideView");
     ui.setTitle("Hガイド 素材");
 
+    const loading = useRef(false);
     const [assets, setAssets] = useState<GGuideAsset[] | null>(null);
     const [bindings, setBindings] = useState<GGuideBinding[] | null>(null);
     const [status, setStatus] = useState<GGuideStatus | null>(null);
@@ -60,8 +61,10 @@ export const GGuideView: React.FC = () => {
     const [selected, setSelected] = useState<GGuideAsset | null>(null);
     const [brokenImages, setBrokenImages] = useState<Set<string>>(new Set());
 
-    const load = useCallback(async (resetBrokenImageState = false) => {
-        setRefreshing(true);
+    const load = useCallback(async (resetBrokenImageState = false, background = false) => {
+        if (loading.current) { return; }
+        loading.current = true;
+        if (!background) { setRefreshing(true); }
         try {
             const [assetsResponse, statusResponse, bindingsResponse] = await Promise.all([
                 fetch("/api/gguide/assets"),
@@ -97,12 +100,15 @@ export const GGuideView: React.FC = () => {
         } catch (err) {
             setError(err instanceof Error ? err.message : "素材を取得できませんでした");
         } finally {
-            setRefreshing(false);
+            loading.current = false;
+            if (!background) { setRefreshing(false); }
         }
     }, []);
 
     useEffect(() => {
         void load();
+        const timer = setInterval(() => { void load(false, true); }, 5000);
+        return () => clearInterval(timer);
     }, [load]);
 
     const filteredAssets = useMemo(() => {

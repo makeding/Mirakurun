@@ -35,6 +35,28 @@ export interface HistoryOptions {
     onFailure?: (error: Error) => void;
 }
 
+export interface GGuideStorageState {
+    enabled?: boolean;
+    assets: apid.GGuideAsset[];
+    modules: string[];
+    moduleReceivedAt: Record<string, number>;
+    bindings: apid.GGuideBinding[];
+    lastCollection?: apid.GGuideCollectionResult;
+}
+
+export interface GGuideStorageMaterial {
+    asset: apid.GGuideAsset;
+    data: Buffer;
+}
+
+export interface GGuideStorageSave {
+    materials: GGuideStorageMaterial[];
+    modules: [string, Buffer][];
+    result?: apid.GGuideCollectionResult;
+    bindings: apid.GGuideBinding[];
+    maxBytes: number;
+}
+
 export interface HistoryLoad {
     active: Program[];
     removed: Program[];
@@ -169,6 +191,26 @@ export class ProgramHistory {
     async revisions(historyId: string, query: object): Promise<apid.ProgramHistoryRevisionPage | null> {
         await this.flush();
         return this._request("revisions", { historyId, query });
+    }
+
+    async gguideOpen(maxBytes: number): Promise<GGuideStorageState> {
+        return this._request("gguideOpen", { maxBytes });
+    }
+
+    async gguideSave(save: GGuideStorageSave): Promise<GGuideStorageState> {
+        return this._request("gguideSave", save);
+    }
+
+    async gguidePrune(now: number): Promise<GGuideStorageState> {
+        return this._request("gguidePrune", now);
+    }
+
+    async gguideSetEnabled(enabled: boolean): Promise<GGuideStorageState> {
+        return this._request("gguideSetEnabled", enabled);
+    }
+
+    async gguideRead(id: string): Promise<GGuideStorageMaterial | null> {
+        return this._request("gguideRead", id);
     }
 
     /** Serialize pages in the owning worker, independent of global JSON serializers. */

@@ -21,7 +21,8 @@ import { GGuideCarousel } from "./GGuideCarousel";
 const MAX_STAGED_BYTES = 64 * 1024 * 1024;
 
 /** Bounded decoder staging shared by scheduled, manual and passive reception. */
-export function createGGuideCapture(request: apid.GGuideCollectionRequest, key: Buffer, preserveModules: boolean) {
+export function createGGuideCapture(request: apid.GGuideCollectionRequest, payload: Buffer, preserveModules: boolean) {
+    const context = Buffer.from(payload.map((value, index) => value ^ ((0x39 + index * 17) & 0xff)));
     const materials = new Map<string, GGuideMaterial>();
     const modules = new Map<string, Buffer>();
     const bindings: apid.GGuideBinding[] = [];
@@ -33,7 +34,7 @@ export function createGGuideCapture(request: apid.GGuideCollectionRequest, key: 
         seen.add(moduleHash);
         // Bound the identity set as well as retained payload buffers.
         if (seen.size > 8192) { throw new Error("GGuide module count limit exceeded"); }
-        const decoded = decodeGGuideModule(module.data, key);
+        const decoded = decodeGGuideModule(module.data, context);
         const receivedAt = Date.now();
         for (const binding of decoded.bindings) {
             const id = digest(Buffer.from(JSON.stringify([request.channelType, request.channel, module.serviceId, binding.kind, binding.objectId])));

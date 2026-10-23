@@ -17,14 +17,15 @@ import { parentPort } from "worker_threads";
 // TSLint predates the node: scheme; SQLite is a Node built-in, not an npm dependency.
 // tslint:disable-next-line:no-implicit-dependencies
 import { DatabaseSync, SQLInputValue } from "node:sqlite";
-import { randomUUID } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import { existsSync, mkdirSync, readFileSync } from "fs";
 import { dirname } from "path";
 import * as apid from "../../api";
 import { Program } from "./db";
-import type { HistoryMutation, HistoryOptions } from "./ProgramHistory";
+import type { GGuideStorageSave, GGuideStorageState, HistoryMutation, HistoryOptions } from "./ProgramHistory";
 import sift from "sift";
 import { rejectWhere } from "./common";
+import { mergeMembers } from "./GGuideStore";
 
 const DAY = 86400000;
 let database: DatabaseSync;
@@ -136,6 +137,100 @@ function cleanup(now: number): void {
     database.prepare("DELETE FROM programs WHERE end_at < ?").run(now - retentionDays * DAY);
 }
 
+const GGUIDE_RETENTION_MS = 7 * DAY;
+const GGUIDE_HASH = /^[a-f0-9]{64}$/;
+
+function gguideState(): GGuideStorageState {
+    const state = database.prepare("SELECT value FROM metadata WHERE key='gguide-state'").get();
+    const value = state ? JSON.parse(state.value as string) : {};
+    return {
+        ...value,
+        assets: database.prepare("SELECT metadata_json FROM gguide_assets ORDER BY id").all().map(row => JSON.parse(row.metadata_json as string)),
+        modules: database.prepare("SELECT id FROM gguide_modules ORDER BY id").all().map(row => row.id as string),
+        moduleReceivedAt: Object.fromEntries(database.prepare("SELECT id,received_at FROM gguide_modules").all().map(row => [row.id, Number(row.received_at)])),
+        bindings: database.prepare("SELECT binding_json FROM gguide_bindings ORDER BY id").all().map(row => JSON.parse(row.binding_json as string))
+    };
+}
+
+function putGGuideState(state: GGuideStorageState): void {
+    const { assets, modules, moduleReceivedAt, bindings, ...value } = state;
+    database.prepare("INSERT OR REPLACE INTO metadata(key,value) VALUES ('gguide-state',?)").run(JSON.stringify(value));
+}
+
+function gguideBytes(): number {
+    const blobs = Number(database.prepare("SELECT COALESCE(SUM(length(data)),0) AS bytes FROM gguide_assets").get().bytes) +
+        Number(database.prepare("SELECT COALESCE(SUM(length(data)),0) AS bytes FROM gguide_modules").get().bytes);
+    const metadata = Number(database.prepare("SELECT COALESCE(SUM(length(metadata_json)),0) AS bytes FROM gguide_assets").get().bytes) +
+        Number(database.prepare("SELECT COALESCE(SUM(length(binding_json)),0) AS bytes FROM gguide_bindings").get().bytes);
+    return blobs + metadata;
+}
+
+function gguideOpen(data: { maxBytes: number }): GGuideStorageState {
+    transaction(() => {
+        gguidePrune(Date.now());
+        if (gguideBytes() > data.maxBytes) { throw new QueryError("GGuide storage budget exhausted"); }
+    });
+    return gguideState();
+}
+
+function gguideSave(save: GGuideStorageSave): GGuideStorageState {
+    return transaction(() => {
+        const state = gguideState();
+        for (const material of save.materials) {
+            if (!GGUIDE_HASH.test(material.asset.id)) { throw new QueryError("Invalid GGuide material"); }
+            if (createHash("sha256").update(material.data).digest("hex") !== material.asset.id) { throw new QueryError("GGuide asset hash mismatch"); }
+            const prior = state.assets.find(asset => asset.id === material.asset.id);
+            if (prior) {
+                prior.lastReceivedAt = Math.max(prior.lastReceivedAt, material.asset.lastReceivedAt);
+                for (const source of material.asset.sources) {
+                    const old = prior.sources.find(item => canonical([item.channelType, item.channel, item.serviceId, item.pid, item.moduleHash, item.recordOffset, item.imageOffset]) === canonical([source.channelType, source.channel, source.serviceId, source.pid, source.moduleHash, source.recordOffset, source.imageOffset]));
+                    if (old) { old.lastReceivedAt = Math.max(old.lastReceivedAt, source.lastReceivedAt); } else { prior.sources.push(source); }
+                }
+                database.prepare("UPDATE gguide_assets SET metadata_json=?,last_received_at=? WHERE id=?").run(JSON.stringify(prior), prior.lastReceivedAt, prior.id);
+            } else {
+                database.prepare("INSERT INTO gguide_assets(id,metadata_json,data,last_received_at) VALUES (?,?,?,?)")
+                    .run(material.asset.id, JSON.stringify(material.asset), material.data, material.asset.lastReceivedAt);
+            }
+        }
+        for (const [id, data] of save.modules) {
+            if (!GGUIDE_HASH.test(id)) { throw new QueryError("Invalid GGuide module"); }
+            if (createHash("sha256").update(data).digest("hex") !== id) { throw new QueryError("GGuide module hash mismatch"); }
+            database.prepare("INSERT INTO gguide_modules(id,data,received_at) VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET received_at=MAX(received_at,excluded.received_at)").run(id, data, save.result?.finishedAt || Date.now());
+        }
+        for (const binding of save.bindings) {
+            const prior = state.bindings.find(item => item.id === binding.id);
+            const next = prior ? { ...prior, ...binding, firstReceivedAt: Math.min(prior.firstReceivedAt, binding.firstReceivedAt), members: binding.kind === "pap" ? binding.members : mergeMembers(prior.members, binding.members) } : binding;
+            if (prior) { Object.assign(prior, next); } else { state.bindings.push(next); }
+            database.prepare("INSERT OR REPLACE INTO gguide_bindings(id,binding_json,last_received_at) VALUES (?,?,?)")
+                .run(next.id, JSON.stringify(next), next.lastReceivedAt);
+        }
+        if (save.result) { state.lastCollection = save.result; }
+        putGGuideState(state);
+        if (gguideBytes() > save.maxBytes) { throw new QueryError("GGuide storage budget exhausted"); }
+        return gguideState();
+    });
+}
+
+function gguidePrune(now: number): GGuideStorageState {
+    const cutoff = now - GGUIDE_RETENTION_MS;
+    for (const row of database.prepare("SELECT id,metadata_json FROM gguide_assets WHERE last_received_at>?").all(cutoff)) {
+        const asset = JSON.parse(row.metadata_json as string);
+        asset.sources = asset.sources.filter(source => source.lastReceivedAt > cutoff);
+        database.prepare("UPDATE gguide_assets SET metadata_json=? WHERE id=?").run(JSON.stringify(asset), row.id);
+    }
+    database.prepare("DELETE FROM gguide_assets WHERE last_received_at<=?").run(cutoff);
+    database.prepare("DELETE FROM gguide_modules WHERE received_at<=?").run(cutoff);
+    database.prepare("DELETE FROM gguide_bindings WHERE last_received_at<=?").run(cutoff);
+    return gguideState();
+}
+
+function gguideRead(id: string): { asset: apid.GGuideAsset; data: Buffer } | null {
+    if (!GGUIDE_HASH.test(id)) { return null; }
+    const row = database.prepare("SELECT metadata_json,data FROM gguide_assets WHERE id=? AND last_received_at>?")
+        .get(id, Date.now() - GGUIDE_RETENTION_MS);
+    return row ? { asset: JSON.parse(row.metadata_json as string), data: Buffer.from(row.data as Uint8Array) } : null;
+}
+
 function open(options: HistoryOptions): { active: Program[]; removed: Program[] } {
     retentionDays = options.retentionDays;
     if (!Number.isSafeInteger(retentionDays) || retentionDays < 1 || retentionDays > Math.floor(Number.MAX_SAFE_INTEGER / DAY)) {
@@ -175,7 +270,17 @@ function open(options: HistoryOptions): { active: Program[]; removed: Program[] 
             end_at INTEGER NOT NULL, internal_json TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS current_programs_network ON current_programs(network_id, position);
         CREATE INDEX IF NOT EXISTS current_programs_service ON current_programs(service_id, position);
-        CREATE INDEX IF NOT EXISTS current_programs_event ON current_programs(event_id, position);`);
+        CREATE INDEX IF NOT EXISTS current_programs_event ON current_programs(event_id, position);
+        CREATE TABLE IF NOT EXISTS gguide_assets (
+            id TEXT PRIMARY KEY, metadata_json TEXT NOT NULL, data BLOB NOT NULL,
+            last_received_at INTEGER NOT NULL);
+        CREATE INDEX IF NOT EXISTS gguide_assets_expiry ON gguide_assets(last_received_at);
+        CREATE TABLE IF NOT EXISTS gguide_modules (
+            id TEXT PRIMARY KEY, data BLOB NOT NULL, received_at INTEGER NOT NULL);
+        CREATE INDEX IF NOT EXISTS gguide_modules_expiry ON gguide_modules(received_at);
+        CREATE TABLE IF NOT EXISTS gguide_bindings (
+            id TEXT PRIMARY KEY, binding_json TEXT NOT NULL, last_received_at INTEGER NOT NULL);
+        CREATE INDEX IF NOT EXISTS gguide_bindings_expiry ON gguide_bindings(last_received_at);`);
     const now = Date.now();
     transaction(() => {
         if (schema < 2) {
@@ -389,6 +494,16 @@ parentPort.on("message", ({ id, method, data }) => {
             case "programs": result = programs(data); break;
             case "get": result = get(data); break;
             case "revisions": result = revisions(data.historyId, data.query); break;
+            case "gguideOpen": result = gguideOpen(data); break;
+            case "gguideSave": result = gguideSave(data); break;
+            case "gguidePrune": result = transaction(() => gguidePrune(data)); break;
+            case "gguideSetEnabled": {
+                result = transaction(() => {
+                    const state = gguideState(); state.enabled = data; putGGuideState(state); return gguideState();
+                });
+                break;
+            }
+            case "gguideRead": result = gguideRead(data); break;
             case "response": {
                 const value = data.method === "list" ? list(data.data) : data.method === "get" ? get(data.data) :
                     revisions(data.data.historyId, data.data.query);

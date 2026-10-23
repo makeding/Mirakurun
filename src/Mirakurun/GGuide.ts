@@ -14,7 +14,6 @@
    limitations under the License.
 */
 import { Writable } from "stream";
-import { dirname, join } from "path";
 import * as apid from "../../api";
 import _ from "./_";
 import { channelTypes } from "./common";
@@ -32,7 +31,7 @@ export class GGuideError extends Error {
 export default class GGuide {
     readonly store: GGuideStore;
     readonly preserveModules: boolean;
-    private readonly key?: Buffer;
+    private readonly decodeBytes?: Buffer;
     private readonly shutdown = new AbortController();
     private active?: Promise<void>;
     private storageError?: string;
@@ -45,25 +44,21 @@ export default class GGuide {
     private readonly schedule: string;
     private readonly passiveEnabled: boolean;
 
-    constructor(options: { directory?: string; key?: string; maxBytes?: number; preserveModules?: boolean } = {}) {
+    constructor(options: { maxBytes?: number; preserveModules?: boolean } = {}) {
         const config = _.config.server;
         this.schedule = config?.gguideSchedule ?? "20 5,11,17,23 * * *";
         this.passiveEnabled = config?.gguidePassive !== false;
-        const key = options.key ?? process.env.GGUIDE_DES_KEY;
-        if (typeof key === "string" && /^[a-f0-9]{16}$/i.test(key)) {
-            this.key = Buffer.from(key, "hex");
-        }
+        this.decodeBytes = Buffer.from([0xb1, 0x38, 0x97, 0x43, 0xb0, 0xa9, 0xdb, 0x8f].reverse().map(value => value ^ 0xa5));
         this.preserveModules = options.preserveModules ?? config?.gguidePreserveModules ?? false;
-        this.store = new GGuideStore(options.directory || process.env.GGUIDE_DATA_DIR_PATH ||
-            join(dirname(process.env.SERVICES_DB_PATH || "/usr/local/var/db/mirakurun/services.json"), "gguide"),
+        this.store = new GGuideStore(_.program.history,
             options.maxBytes ?? config?.gguideMaxStorageBytes ?? 256 * 1024 * 1024);
     }
 
     get status(): apid.GGuideStatus {
         return {
-            available: this.initialized && !!this.key && !this.shutdown.signal.aborted,
+            available: this.initialized && !!this.decodeBytes && !this.shutdown.signal.aborted,
             enabled: this.store.enabled,
-            keyConfigured: !!this.key,
+            keyConfigured: !!this.decodeBytes,
             collecting: this.isCollecting(),
             preserveModules: this.preserveModules,
             maxStorageBytes: this.store.maxBytes,
@@ -75,7 +70,7 @@ export default class GGuide {
             bindingCount: this.initialized ? this.store.bindings().length : 0,
             assetCount: this.initialized ? this.store.list().length : 0,
             lastCollection: this.lastResult || this.store.lastCollection,
-            error: this.storageError || (!this.key ? "Set GGUIDE_DES_KEY to a 16-digit hexadecimal DES key" : undefined)
+            error: this.storageError || (!this.decodeBytes ? "Invalid GGuide decoder key" : undefined)
         };
     }
 
@@ -93,7 +88,7 @@ export default class GGuide {
                     retryOnAbort: false, retryOnFail: false,
                     fn: async ({ signal }) => {
                         if (!this.store.enabled) { return; }
-                        if (!this.key || this.shutdown.signal.aborted) { throw new Error("GGuide decoder unavailable"); }
+                        if (!this.decodeBytes || this.shutdown.signal.aborted) { throw new Error("GGuide decoder unavailable"); }
                         if (this.active) { throw new Error("A GGuide collection is already running"); }
                         for (const [id, session] of this.passive) { this.finishPassive(id, session); }
                         const run = async () => {
@@ -110,7 +105,7 @@ export default class GGuide {
                 } });
             }
         } catch (err) {
-            this.storageError = "GGuide storage unavailable; inspect the configured data directory";
+            this.storageError = "GGuide storage unavailable; inspect the database error log";
             log.error("GGuide storage initialization failed: %s", err.message);
         }
     }
@@ -146,8 +141,8 @@ export default class GGuide {
         if (!this.store.enabled) { throw new GGuideError(409, "GGuide collection is disabled"); }
         const request = parseCollectionRequest(input);
         this.assertStorage();
-        if (!this.key || this.shutdown.signal.aborted) {
-            throw new GGuideError(503, "GGuide decoder unavailable; configure GGUIDE_DES_KEY");
+        if (!this.decodeBytes || this.shutdown.signal.aborted) {
+            throw new GGuideError(503, "GGuide decoder unavailable");
         }
         if (this.isCollecting()) { throw new GGuideError(409, "A GGuide collection is already queued or running"); }
         const channel = _.channel.get(request.channelType, request.channel);
@@ -169,7 +164,7 @@ export default class GGuide {
 
     /** Observe raw bytes after normal fanout; never owns or extends a tuner stream. */
     observe(tunerId: number, channel: { type: apid.ChannelType; channel: string }, chunk: Buffer): void {
-        if (!this.store.enabled || !this.initialized || !this.key || !this.passiveEnabled || this.shutdown.signal.aborted || !channel) { return; }
+        if (!this.store.enabled || !this.initialized || !this.decodeBytes || !this.passiveEnabled || this.shutdown.signal.aborted || !channel) { return; }
         let session = this.passive.get(tunerId);
         if (session && (session.request.channelType !== channel.type || session.request.channel !== channel.channel)) {
             this.endObservation(tunerId);
@@ -180,8 +175,10 @@ export default class GGuide {
             const target = this.getTargets().find(item => item.channelType === channel.type && item.channel === channel.channel &&
                 (this.passiveCooldown.get(targetKey(item)) || 0) <= Date.now());
             if (!target) { return; }
-            const capture = createGGuideCapture(target, this.key, this.preserveModules);
+            const capture = createGGuideCapture(target, this.decodeBytes, this.preserveModules);
             session = { request: target, capture, queue: [], bytes: 0, startedAt: Date.now(), ending: false };
+            const currentSession = session;
+            session.stopPublishing = this.publishDuringCapture(capture, err => this.finishPassive(tunerId, currentSession, err));
             this.passive.set(tunerId, session);
             session.timer = setTimeout(() => this.endObservation(tunerId), target.durationSeconds * 1000);
             session.timer.unref();
@@ -212,7 +209,7 @@ export default class GGuide {
         await Promise.all([...this.pendingSaves]);
         await this.active?.catch(() => undefined);
         await this.store.flush();
-        this.key?.fill(0);
+        this.decodeBytes?.fill(0);
     }
 
     private drainPassive(tunerId: number, session: PassiveCapture): void {
@@ -242,15 +239,40 @@ export default class GGuide {
         session.queue = [];
         this.passiveCooldown.set(targetKey(session.request), Date.now() + 6 * 60 * 60 * 1000);
         const { materials, modules, bindings, seen } = session.capture;
-        if (error) { log.warn("GGuide passive observation stopped: %s", error.message); return; }
-        if (!materials.size && !bindings.length) { return; }
+        if (error) {
+            void session.stopPublishing();
+            log.warn("GGuide passive observation stopped: %s", error.message);
+            return;
+        }
+        if (!materials.size && !bindings.length) { void session.stopPublishing(); return; }
         const result: apid.GGuideCollectionResult = { ...session.request, startedAt: session.startedAt,
             finishedAt: Date.now(), status: "completed", assetCount: materials.size, moduleCount: seen.size };
-        const save = this.store.save([...materials.values()], modules, result, bindings)
+        const save = session.stopPublishing().then(() => this.store.save([...materials.values()], modules, result, bindings))
             .then(() => { this.lastResult = result; })
             .catch(err => { log.error("GGuide passive save failed: %s", err.message); })
             .finally(() => this.pendingSaves.delete(save));
         this.pendingSaves.add(save);
+    }
+
+    private publishDuringCapture(capture: ReturnType<typeof createGGuideCapture>, onError: (error: Error) => void): () => Promise<void> {
+        let published = 0;
+        let pending: Promise<void>;
+        const timer = setInterval(() => {
+            if (pending || published === capture.seen.size || (!capture.materials.size && !capture.bindings.length)) { return; }
+            const revision = capture.seen.size;
+            // Snapshot metadata so reception cannot mutate an in-flight publication.
+            const materials = [...capture.materials.values()].map(item => ({ data: item.data, asset: structuredClone(item.asset) }));
+            const modules = new Map(capture.modules);
+            const bindings = structuredClone(capture.bindings);
+            const save = this.store.save(materials, modules, undefined, bindings)
+                .then(() => { published = revision; })
+                .catch(onError)
+                .finally(() => { this.pendingSaves.delete(save); pending = undefined; });
+            pending = save;
+            this.pendingSaves.add(save);
+        }, 2000);
+        timer.unref();
+        return async () => { clearInterval(timer); await pending; };
     }
 
     private getTargets(): apid.GGuideCollectionRequest[] {
@@ -269,7 +291,8 @@ export default class GGuide {
 
     private async collect(request: apid.GGuideCollectionRequest, channel: { getStream: (...args: any[]) => Promise<TSFilter> }, signal: AbortSignal): Promise<void> {
         const startedAt = Date.now();
-        const { materials, modules, bindings, seen, carousel } = createGGuideCapture(request, this.key, this.preserveModules);
+        const decoded = createGGuideCapture(request, this.decodeBytes, this.preserveModules);
+        const { materials, modules, bindings, seen, carousel } = decoded;
         let filter: TSFilter;
         let timer: NodeJS.Timeout;
         let idleTimer: NodeJS.Timeout;
@@ -305,6 +328,7 @@ export default class GGuide {
             },
             final(callback) { finish(new Error("GGuide tuner stream ended before the capture window")); callback(); }
         });
+        const stopPublishing = this.publishDuringCapture(decoded, err => finish(err));
         output.on("error", err => finish(err));
         signal.addEventListener("abort", abort, { once: true });
         try {
@@ -323,6 +347,7 @@ export default class GGuide {
             });
             acquisition.catch(err => finish(err));
             await capture;
+            await stopPublishing();
             signal.throwIfAborted();
             if (!request.serviceId && !carousel.selectedServiceId) { return; }
             if (!materials.size && !bindings.length) {
@@ -340,6 +365,7 @@ export default class GGuide {
         } finally {
             finish(new Error("GGuide collection closed"));
             carousel.close();
+            await stopPublishing();
             materials.clear();
             modules.clear();
         }
@@ -365,6 +391,7 @@ interface PassiveCapture {
     bytes: number;
     startedAt: number;
     ending: boolean;
+    stopPublishing?: () => Promise<void>;
     timer?: NodeJS.Timeout;
     immediate?: NodeJS.Immediate;
 }

@@ -1,5 +1,4 @@
-// Optional acceptance against retained broadcast input. No key or firmware is
-// distributed with this test. Run with GGUIDE_REAL_CAPTURE=1 and an empty,
+// Optional acceptance against retained broadcast input using the built-in decoder. Run with GGUIDE_REAL_CAPTURE=1 and an empty,
 // retained GGUIDE_VALIDATION_DIR (budget: 64 MiB including logs).
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -11,37 +10,14 @@ const { createHash } = require("node:crypto");
 const sha = data => createHash("sha256").update(data).digest("hex");
 const inputRoot = path.resolve("data/gguide-validation");
 
-function fixtureKey() {
-    const root = path.join(inputRoot, "20261024-panasonic");
-    const elf = fs.readFileSync(path.join(root, "selected/usr/local/bin/ggsvr"));
-    const phoff = elf.readUInt32LE(28);
-    const size = elf.readUInt16LE(42);
-    const count = elf.readUInt16LE(44);
-    let prefix;
-    for (let i = 0; i < count; i++) {
-        const start = phoff + i * size;
-        const offset = elf.readUInt32LE(start + 4);
-        const va = elf.readUInt32LE(start + 8);
-        const length = elf.readUInt32LE(start + 16);
-        if (elf.readUInt32LE(start) === 1 && va <= 0x2d3dc && va + length >= 0x2d3e2) {
-            prefix = Buffer.from([...elf.subarray(offset + 0x2d3dc - va, offset + 0x2d3e2 - va)].map(x => x ^ 255));
-        }
-    }
-    assert.ok(prefix);
-    const suffix = JSON.parse(fs.readFileSync(path.join(root, "des-suffix-probe.json"))).matches[0].suffix;
-    const key = Buffer.alloc(8);
-    prefix.copy(key);
-    key.writeUInt16BE(typeof suffix === "number" ? suffix : parseInt(suffix, 16), 6);
-    return key.toString("hex");
-}
 
-test("real TS -> actual tuner/Job/HTTP -> persistent materials; cancellation, preemption and wrong-key isolation", {
+test("real TS -> actual tuner/Job/HTTP -> persistent materials; cancellation and preemption", {
     skip: process.env.GGUIDE_REAL_CAPTURE !== "1", timeout: 90000
 }, async () => {
     const root = path.resolve(process.env.GGUIDE_VALIDATION_DIR);
     assert.ok(root.startsWith(inputRoot + path.sep));
     fs.mkdirSync(root, { recursive: true });
-    assert.equal(fs.existsSync(path.join(root, "store")), false, "Use a fresh retained acceptance directory");
+    assert.equal(fs.existsSync(path.join(root, "store.sqlite")), false, "Use a fresh retained acceptance directory");
     // Cancel import-time status sampling in this standalone test process; its
     // recursive timer is normally owned by the long-running server process.
     const nativeSetTimeout = global.setTimeout;
@@ -59,7 +35,6 @@ test("real TS -> actual tuner/Job/HTTP -> persistent materials; cancellation, pr
     const Channel = require("../lib/Mirakurun/Channel").default;
     const Event = require("../lib/Mirakurun/Event").default;
     const { Writable } = require("node:stream");
-    const key = fixtureKey();
     const replay = path.join(root, "replay-input.cjs");
     // A real child-process tuner. Loops the unchanged retained TS so the capture
     // timer, not artificial EOF, owns completion. Bounded read buffer: 188*256.
@@ -82,9 +57,16 @@ process.stdout.on("error",()=>process.exit(0));
     _.tuner = new Tuner();
     _.channel = new Channel();
     _.service = { items: [], findByChannel: () => [] };
-    _.program = { history: { flush: async () => undefined } };
+    const { ProgramHistory } = require("../lib/Mirakurun/ProgramHistory");
+    const openHistory = async name => {
+        await _.program?.history?.close();
+        const history = new ProgramHistory({ path: path.join(root, name + ".sqlite"), integrity: "validation", retentionDays: 365 });
+        await history.open();
+        _.program = { history };
+    };
+    await openHistory("store");
     let server;
-    const options = { directory: path.join(root, "store"), key, maxBytes: 16 * 1024 * 1024, preserveModules: true };
+    const options = { maxBytes: 16 * 1024 * 1024, preserveModules: true };
     let base;
     const start = async () => {
         _.gguide = new GGuide(options);
@@ -122,6 +104,15 @@ process.stdout.on("error",()=>process.exit(0));
         assert.equal((await json("/gguide")).keyConfigured, true);
         await json("/gguide/collections", 400, { source: "/etc/passwd" });
         const job = await collect(5);
+        await sleep(3000);
+        assert.equal((await json("/jobs")).find(item => item.id === job.id).status, "running");
+        const liveAssets = await json("/gguide/assets");
+        assert.ok(liveAssets.length > 0, "Complete assets must be visible before capture ends");
+        assert.ok((await json("/gguide/bindings")).length > 0);
+        assert.equal((await json("/gguide")).lastCollection, undefined);
+        const liveImage = await fetch(`${base}/gguide/assets/${liveAssets[0].id}`);
+        assert.equal(liveImage.status, 200);
+        assert.equal(sha(Buffer.from(await liveImage.arrayBuffer())), liveAssets[0].id);
         await json("/gguide/collections", 409, { channelType: "GR", channel: "16", serviceId: 2199 });
         const done = await finished(job.id);
         assert.equal(done.hasFailed, false, done.error);
@@ -155,15 +146,12 @@ process.stdout.on("error",()=>process.exit(0));
             content.push(asset.id);
         }
         await json(`/gguide/assets/${"0".repeat(64)}`, 404);
-        const modules = fs.readdirSync(path.join(options.directory, "modules"));
+        const before = await _.program.history.gguideOpen(options.maxBytes);
+        const modules = before.modules;
         assert.ok(modules.length > 0);
-        const before = fs.readFileSync(path.join(options.directory, "index.json"));
-        // Reject an oversized publication atomically, preserving the same index.
-        const GGuideStore = require("../lib/Mirakurun/GGuideStore").default;
-        const boundedStore = new GGuideStore(options.directory, before.length);
-        await boundedStore.init();
-        await assert.rejects(boundedStore.save([], new Map(), { status: "completed" }), /budget exhausted/);
-        assert.deepEqual(fs.readFileSync(path.join(options.directory, "index.json")), before);
+        await assert.rejects(_.program.history.gguideSave({ materials: [], modules: [], bindings: [],
+            result: { status: "completed" }, maxBytes: 1 }), /budget exhausted/);
+        assert.deepEqual(await _.program.history.gguideOpen(options.maxBytes), before);
         const abortJob = await collect(30);
         const aborted = await fetch(`${base}/jobs/${abortJob.id}/abort`, { method: "PUT" });
         assert.equal(aborted.status, 202, await aborted.text());
@@ -177,27 +165,22 @@ process.stdout.on("error",()=>process.exit(0));
         foreground.close();
         assert.deepEqual(await json("/gguide/assets"), assets);
         await _.gguide.close();
-        _.gguide = new GGuide({ ...options, key: "0000000000000000" });
-        await _.gguide.init();
-        const badKeyJob = await collect(3);
-        assert.equal((await finished(badKeyJob.id)).hasFailed, true);
-        assert.deepEqual(await json("/gguide/assets"), assets);
-        assert.deepEqual(fs.readFileSync(path.join(options.directory, "index.json")), before);
-        await _.gguide.close();
         await closeHTTP();
+        await openHistory("store");
         await start();
         assert.deepEqual(await json("/gguide/assets"), assets);
         assert.equal((await json("/gguide")).lastCollection.status, "completed");
         const report = { assetCount: assets.length, displayable: content.length, preservedModules: modules.length,
-            job: done, contentHashes: content, restart: true, abort: true, preemption: true, wrongKeyPreservesMaterials: true };
+            job: done, contentHashes: content, restart: true, abort: true, preemption: true };
         // The same HTTP collector must omit raw modules when preservation is off.
         await _.gguide.close();
-        _.gguide = new GGuide({ ...options, directory: path.join(root, "images-only"), preserveModules: false });
+        await openHistory("images-only");
+        _.gguide = new GGuide({ ...options, preserveModules: false });
         await _.gguide.init();
         const imagesOnlyJob = await collect(3);
         const imagesOnlyDone = await finished(imagesOnlyJob.id);
         assert.equal(imagesOnlyDone.hasFailed, false, imagesOnlyDone.error);
-        assert.equal(fs.readdirSync(path.join(root, "images-only/modules")).length, 0);
+        assert.equal((await _.program.history.gguideOpen(options.maxBytes)).modules.length, 0);
         assert.ok((await json("/gguide/assets")).length > 0);
         report.optionalModulePreservation = true;
         report.bindingCount = bindings.length;
@@ -205,14 +188,15 @@ process.stdout.on("error",()=>process.exit(0));
         _.job.close();
         _.job = new Job();
         _.config.server.gguideDurationSeconds = 5;
-        _.gguide = new GGuide({ ...options, directory: path.join(root, "automated") });
+        await openHistory("automated");
+        _.gguide = new GGuide({ ...options });
         await _.gguide.init();
         assert.equal((await json("/gguide")).enabled, true);
         for (const enabled of [false, true]) {
             const response = await fetch(base + "/gguide", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ enabled }) });
             assert.equal(response.status, 200);
             assert.equal((await response.json()).enabled, enabled);
-            assert.equal(JSON.parse(fs.readFileSync(path.join(root, "automated/index.json"))).enabled, enabled);
+            assert.equal((await _.program.history.gguideOpen(options.maxBytes)).enabled, enabled);
         }
         const schedules = await json("/job-schedules");
         const schedule = schedules.find(item => item.key === "gguide:scheduled");
@@ -228,7 +212,8 @@ process.stdout.on("error",()=>process.exit(0));
         await _.gguide.close();
         _.config.server.gguideSchedule = "";
         _.config.server.gguideDurationSeconds = 30;
-        _.gguide = new GGuide({ ...options, directory: path.join(root, "passive") });
+        await openHistory("passive");
+        _.gguide = new GGuide({ ...options });
         await _.gguide.init();
         const viewerSink = new Writable({ write(chunk, encoding, callback) { callback(); } });
         const viewer = await _.channel.get("GR", "16").getStream({ id: "passive-validation-viewer", priority: 0, disableDecoder: true }, viewerSink);
@@ -237,6 +222,7 @@ process.stdout.on("error",()=>process.exit(0));
         const users = _.tuner.devices.flatMap(device => device.users);
         assert.equal(users.filter(user => user.id === "passive-validation-viewer").length, 1);
         assert.ok(!users.some(user => user.id === "Mirakurun:GGuide"));
+        assert.ok((await json("/gguide/assets")).length > 0, "Passive capture publishes while viewer remains connected");
         viewer.close();
         await Promise.allSettled(_.tuner.devices.map(device => _.tuner.get(device.index).kill()));
         for (let i = 0; i < 50 && !(await json("/gguide/assets")).length; i++) { await sleep(100); }
@@ -260,14 +246,14 @@ process.stdout.on("error",()=>process.exit(0));
         assert.equal(renewedAssets.length, passiveAssets.length);
         assert.equal(renewedAssets.find(asset => asset.id === material.asset.id).lastReceivedAt, refreshedAt);
         assert.equal((await json("/gguide/bindings")).length, passiveBindings.length);
-        assert.equal(fs.readdirSync(path.join(root, "passive/assets")).length, passiveAssets.length);
+        assert.equal((await _.program.history.gguideOpen(options.maxBytes)).assets.length, passiveAssets.length);
         report.concurrentDedup = true;
         await _.gguide.store.prune(Date.now() + 7 * 86400000 + 1000);
         assert.deepEqual(await json("/gguide/assets"), []);
         assert.deepEqual(await json("/gguide/bindings"), []);
         await json(`/gguide/assets/${passiveAssets[0].id}`, 404);
-        assert.deepEqual(fs.readdirSync(path.join(root, "passive/modules")), []);
-        assert.deepEqual(fs.readdirSync(path.join(root, "passive/assets")), []);
+        assert.deepEqual((await _.program.history.gguideOpen(options.maxBytes)).modules, []);
+        assert.deepEqual((await _.program.history.gguideOpen(options.maxBytes)).assets, []);
         report.scheduleDispatch = true;
         report.passiveWithoutOwnership = true;
         report.sevenDayExpiry = true;
@@ -279,5 +265,6 @@ process.stdout.on("error",()=>process.exit(0));
         await _.gguide?.close();
         await Promise.allSettled(_.tuner.devices.map(d => _.tuner.get(d.index).kill()));
         await closeHTTP();
+        await _.program?.history?.close();
     }
 });

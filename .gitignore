@@ -12,3 +12,5 @@
 test.*
 .DS_Store
 .codegraph
+# Local GGuide firmware, broadcast samples and retained diagnostic output
+/data/gguide-validation/
