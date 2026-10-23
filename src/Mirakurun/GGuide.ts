@@ -42,13 +42,11 @@ export default class GGuide {
     private passive = new Map<number, PassiveCapture>();
     private passiveCooldown = new Map<string, number>();
     private pendingSaves = new Set<Promise<void>>();
-    private readonly targets: apid.GGuideCollectionRequest[];
     private readonly schedule: string;
     private readonly passiveEnabled: boolean;
 
     constructor(options: { directory?: string; key?: string; maxBytes?: number; preserveModules?: boolean } = {}) {
         const config = _.config.server;
-        this.targets = (config?.gguideTargets || []).map(parseCollectionRequest);
         this.schedule = config?.gguideSchedule ?? "20 5,11,17,23 * * *";
         this.passiveEnabled = config?.gguidePassive !== false;
         const key = options.key ?? process.env.GGUIDE_DES_KEY;
@@ -69,8 +67,8 @@ export default class GGuide {
             preserveModules: this.preserveModules,
             maxStorageBytes: this.store.maxBytes,
             retentionDays: GGUIDE_RETENTION_MS / 86400000,
-            schedule: this.targets.length ? this.schedule : undefined,
-            targets: this.targets,
+            schedule: this.schedule || undefined,
+            targets: this.getTargets(),
             passiveEnabled: this.passiveEnabled,
             passiveCollections: this.passive.size,
             bindingCount: this.initialized ? this.store.bindings().length : 0,
@@ -88,7 +86,7 @@ export default class GGuide {
                 this.store.prune().catch(err => log.error("GGuide retention cleanup failed: %s", err.message));
             }, 60000);
             this.cleanupTimer.unref();
-            if (this.targets.length && this.schedule) {
+            if (this.schedule) {
                 _.job.addSchedule({ key: "gguide:scheduled", schedule: this.schedule, job: {
                     key: "gguide:scheduled", name: "GGuide Gatherer", isRerunnable: false,
                     retryOnAbort: false, retryOnFail: false,
@@ -98,7 +96,7 @@ export default class GGuide {
                         for (const [id, session] of this.passive) { this.finishPassive(id, session); }
                         const run = async () => {
                             await Promise.all([...this.pendingSaves]);
-                            for (const target of this.targets) {
+                            for (const target of this.getTargets()) {
                                 const channel = _.channel.get(target.channelType, target.channel);
                                 if (!channel) { throw new Error(`GGuide channel not configured: ${target.channelType}/${target.channel}`); }
                                 await this.collect(target, channel, AbortSignal.any([signal, this.shutdown.signal]));
@@ -164,7 +162,7 @@ export default class GGuide {
         }
         if (!session) {
             if (this.isCollecting()) { return; }
-            const target = this.targets.find(item => item.channelType === channel.type && item.channel === channel.channel &&
+            const target = this.getTargets().find(item => item.channelType === channel.type && item.channel === channel.channel &&
                 (this.passiveCooldown.get(targetKey(item)) || 0) <= Date.now());
             if (!target) { return; }
             const capture = createGGuideCapture(target, this.key, this.preserveModules);
@@ -240,6 +238,12 @@ export default class GGuide {
         this.pendingSaves.add(save);
     }
 
+    private getTargets(): apid.GGuideCollectionRequest[] {
+        return (_.channel?.items || []).filter(channel => channel.type === "GR" || channel.type === "GR-ALT")
+            .map(channel => ({ channelType: channel.type, channel: channel.channel,
+                durationSeconds: _.config.server.gguideDurationSeconds ?? 1800 }));
+    }
+
     private isCollecting(): boolean {
         return !!this.active || this.passive.size > 0 || !!_.job?.jobs.some(job => job.key.startsWith(JOB_PREFIX) && job.status !== "finished");
     }
@@ -254,6 +258,7 @@ export default class GGuide {
         let filter: TSFilter;
         let timer: NodeJS.Timeout;
         let idleTimer: NodeJS.Timeout;
+        let probeTimer: NodeJS.Timeout;
         let ended = false;
         let resolveCapture: () => void;
         let rejectCapture: (err: Error) => void;
@@ -265,6 +270,7 @@ export default class GGuide {
             ended = true;
             clearTimeout(timer);
             clearTimeout(idleTimer);
+            clearTimeout(probeTimer);
             signal.removeEventListener("abort", abort);
             if (error) { rejectCapture(error); } else { resolveCapture(); }
             filter?.close();
@@ -296,10 +302,14 @@ export default class GGuide {
                 filter = acquired;
                 filter.once("close", () => finish(new Error("GGuide tuner was closed or preempted")));
                 timer = setTimeout(() => finish(), request.durationSeconds * 1000);
+                if (!request.serviceId) {
+                    probeTimer = setTimeout(() => { if (!carousel.selectedServiceId) { finish(); } }, 10000);
+                }
             });
             acquisition.catch(err => finish(err));
             await capture;
             signal.throwIfAborted();
+            if (!request.serviceId && !carousel.selectedServiceId) { return; }
             if (!materials.size && !bindings.length) {
                 throw new Error("No GGuide materials or bindings received; check service, key and capture window");
             }
@@ -326,7 +336,7 @@ export function parseCollectionRequest(input: unknown): apid.GGuideCollectionReq
     if (!value || typeof value !== "object" || Array.isArray(value) ||
         Object.keys(value).some(key => !["channelType", "channel", "serviceId", "durationSeconds"].includes(key)) ||
         !channelTypes.includes(value.channelType) || typeof value.channel !== "string" || !value.channel.length ||
-        !Number.isInteger(value.serviceId) || value.serviceId < 1 || value.serviceId > 65535 ||
+        (value.serviceId !== undefined && (!Number.isInteger(value.serviceId) || value.serviceId < 1 || value.serviceId > 65535)) ||
         (value.durationSeconds !== undefined && (!Number.isInteger(value.durationSeconds) || value.durationSeconds < 1 || value.durationSeconds > 1800))) {
         throw new GGuideError(400, "Expected channelType, channel, serviceId and optional durationSeconds (1-1800)");
     }

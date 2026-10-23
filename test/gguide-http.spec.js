@@ -202,7 +202,7 @@ process.stdout.on("error",()=>process.exit(0));
         report.optionalModulePreservation = true;
         report.bindingCount = bindings.length;
         await _.gguide.close();
-        _.config.server.gguideTargets = [{ channelType: "GR", channel: "16", serviceId: 2199, durationSeconds: 5 }];
+        _.config.server.gguideDurationSeconds = 5;
         _.gguide = new GGuide({ ...options, directory: path.join(root, "automated") });
         await _.gguide.init();
         const schedules = await json("/job-schedules");
@@ -218,7 +218,7 @@ process.stdout.on("error",()=>process.exit(0));
         // Use a fresh store and real viewer-owned tuner; no collector user exists.
         await _.gguide.close();
         _.config.server.gguideSchedule = "";
-        _.config.server.gguideTargets[0].durationSeconds = 30;
+        _.config.server.gguideDurationSeconds = 30;
         _.gguide = new GGuide({ ...options, directory: path.join(root, "passive") });
         await _.gguide.init();
         const viewerSink = new Writable({ write(chunk, encoding, callback) { callback(); } });

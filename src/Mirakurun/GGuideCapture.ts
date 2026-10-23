@@ -36,15 +36,15 @@ export function createGGuideCapture(request: apid.GGuideCollectionRequest, key: 
         const decoded = decodeGGuideModule(module.data, key);
         const receivedAt = Date.now();
         for (const binding of decoded.bindings) {
-            const id = digest(Buffer.from(JSON.stringify([request.channelType, request.channel, request.serviceId, binding.kind, binding.objectId])));
+            const id = digest(Buffer.from(JSON.stringify([request.channelType, request.channel, module.serviceId, binding.kind, binding.objectId])));
             stagedBytes += Buffer.byteLength(JSON.stringify(binding));
             bindings.push({ ...binding, id, channelType: request.channelType, channel: request.channel,
-                serviceId: request.serviceId, firstReceivedAt: receivedAt, lastReceivedAt: receivedAt });
+                serviceId: module.serviceId, firstReceivedAt: receivedAt, lastReceivedAt: receivedAt });
         }
         for (const image of decoded.assets) {
             const id = digest(image.data);
             const source: apid.GGuideSource = {
-                channelType: request.channelType, channel: request.channel, serviceId: request.serviceId,
+                channelType: request.channelType, channel: request.channel, serviceId: module.serviceId,
                 pid: module.pid, downloadId: module.downloadId, moduleId: module.moduleId,
                 moduleVersion: module.moduleVersion, moduleHash, moduleName: decoded.moduleName,
                 recordOffset: image.recordOffset, imageOffset: image.imageOffset, recordType: image.recordType,

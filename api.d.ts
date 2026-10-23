@@ -302,7 +302,7 @@ export interface ConfigServer {
     eventEndTimeout?: number;
     programGCJobSchedule?: string;
     programHistoryRetentionDays?: number;
-    gguideTargets?: GGuideCollectionRequest[];
+    gguideDurationSeconds?: number;
     gguideSchedule?: string;
     gguidePassive?: boolean;
     gguidePreserveModules?: boolean;
@@ -555,7 +555,7 @@ export interface GGuideBinding {
 export interface GGuideCollectionRequest {
     channelType: ChannelType;
     channel: string;
-    serviceId: number;
+    serviceId?: number;
     durationSeconds?: number;
 }
 

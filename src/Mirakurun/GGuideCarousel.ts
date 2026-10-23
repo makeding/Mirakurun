@@ -16,6 +16,7 @@
 import { TsStreamLite } from "@chinachu/aribts";
 
 export interface GGuideModule {
+    serviceId: number;
     pid: number;
     downloadId: number;
     moduleId: number;
@@ -24,7 +25,8 @@ export interface GGuideModule {
 }
 
 export interface GGuideCarouselOptions {
-    serviceId: number;
+    /** A service ID, or zero/undefined to discover the first G-Guide service. */
+    serviceId?: number;
     onModule: (module: GGuideModule) => void;
     maxModuleBytes?: number;
     maxBufferedBytes?: number;
@@ -59,16 +61,19 @@ export class GGuideCarousel {
     private _parser = new TsStreamLite();
     private _pending = Buffer.alloc(0);
     private _pmtPid = -1;
+    private _pmtPids = new Map<number, number>();
     private _dataPids = new Set<number>();
+    private _selectedServiceId: number | undefined;
     private _modules = new Map<string, DownloadModule>();
     private _closed = false;
     private _maxModuleBytes: number;
     private _maxBufferedBytes: number;
 
     constructor(private _options: GGuideCarouselOptions) {
-        if (!Number.isInteger(_options.serviceId) || _options.serviceId < 1 || _options.serviceId > 0xffff) {
+        if (_options.serviceId !== undefined && (!Number.isInteger(_options.serviceId) || _options.serviceId < 0 || _options.serviceId > 0xffff)) {
             throw new Error("GGuide service ID is invalid");
         }
+        if (_options.serviceId) { this._selectedServiceId = _options.serviceId; }
         this._maxModuleBytes = _options.maxModuleBytes || DEFAULT_MAX_MODULE_BYTES;
         this._maxBufferedBytes = _options.maxBufferedBytes || DEFAULT_MAX_BUFFERED_BYTES;
         if (!Number.isSafeInteger(this._maxModuleBytes) || this._maxModuleBytes < 1 ||
@@ -101,7 +106,7 @@ export class GGuideCarousel {
             }
             const packet = this._pending.subarray(offset, offset + PACKET_SIZE);
             const pid = ((packet[1] & 0x1f) << 8) | packet[2];
-            if (pid === 0 || pid === this._pmtPid || this._dataPids.has(pid)) {
+            if (pid === 0 || pid === this._pmtPid || this._pmtPids.has(pid) || this._dataPids.has(pid)) {
                 this._parser.write([packet]);
                 this.stats.packets++;
             }
@@ -120,10 +125,15 @@ export class GGuideCarousel {
         this.stats.bufferedBytes = 0;
         this._pending = Buffer.alloc(0);
         this._dataPids.clear();
+        this._pmtPids.clear();
     }
 
     getStats(): GGuideCarouselStats {
         return { ...this.stats };
+    }
+
+    get selectedServiceId(): number | undefined {
+        return this._selectedServiceId;
     }
 
     private _moduleKey(pid: number, downloadId: number, moduleId: number, moduleVersion: number): string {
@@ -144,17 +154,38 @@ export class GGuideCarousel {
         if (pat.current_next_indicator !== 1) {
             return;
         }
-        const program = pat.programs?.find((item: any) => item.program_number === this._options.serviceId);
-        if (!program || program.program_map_PID === this._pmtPid) {
+        if (!Array.isArray(pat.programs)) {
             return;
         }
-        this._pmtPid = program.program_map_PID;
-        this._dataPids.clear();
-        this._discardAll();
+        if (this._options.serviceId) {
+            const program = pat.programs.find((item: any) => item.program_number === this._options.serviceId);
+            if (!program || program.program_map_PID === this._pmtPid) { return; }
+            this._pmtPid = program.program_map_PID;
+            this._pmtPids = new Map([[program.program_map_PID, program.program_number]]);
+            this._dataPids.clear();
+            this._discardAll();
+            return;
+        }
+        const next = new Map<number, number>();
+        for (const program of pat.programs) {
+            if (Number.isInteger(program.program_number) && program.program_number > 0 && Number.isInteger(program.program_map_PID)) {
+                next.set(program.program_map_PID, program.program_number);
+            }
+        }
+        this._pmtPids = next;
+        if (this._pmtPid !== -1 && !next.has(this._pmtPid)) {
+            this._pmtPid = -1;
+            this._selectedServiceId = undefined;
+            this._dataPids.clear();
+            this._discardAll();
+        }
     }
 
     private _onPmt(pid: number, pmt: any): void {
-        if (pmt.current_next_indicator !== 1 || pid !== this._pmtPid || pmt.program_number !== this._options.serviceId) {
+        if (pmt.current_next_indicator !== 1 || this._pmtPids.get(pid) !== pmt.program_number) {
+            return;
+        }
+        if (this._pmtPid !== -1 && pid !== this._pmtPid) {
             return;
         }
         const nextPids = new Set<number>();
@@ -169,6 +200,12 @@ export class GGuideCarousel {
                 nextPids.add(stream.elementary_PID);
             }
         }
+        if (this._pmtPid === -1) {
+            if (nextPids.size === 0) { return; }
+            this._pmtPid = pid;
+            this._selectedServiceId = pmt.program_number;
+            this._discardAll();
+        }
         for (const key of this._modules.keys()) {
             const module = this._modules.get(key);
             if (module && !nextPids.has(module.pid)) {
@@ -179,7 +216,7 @@ export class GGuideCarousel {
     }
 
     private _onDsmcc(pid: number, section: any): void {
-        if (!this._dataPids.has(pid) || section.current_next_indicator !== 1) {
+        if (this._closed || !this._dataPids.has(pid) || section.current_next_indicator !== 1) {
             return;
         }
         const message = section.message;
@@ -254,7 +291,8 @@ export class GGuideCarousel {
         this._modules.delete(key);
         this.stats.bufferedBytes -= module.data.length;
         this.stats.completed++;
-        this._options.onModule({ pid: module.pid, downloadId: module.downloadId, moduleId: module.moduleId,
+        if (this._closed || this._selectedServiceId === undefined) { return; }
+        this._options.onModule({ serviceId: this._selectedServiceId, pid: module.pid, downloadId: module.downloadId, moduleId: module.moduleId,
             moduleVersion: module.moduleVersion, data: module.data });
     }
 

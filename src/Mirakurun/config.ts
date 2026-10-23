@@ -221,12 +221,8 @@ export async function loadServer(): Promise<Server> {
     if (config.gguidePassive !== undefined && typeof config.gguidePassive !== "boolean") {
         throw new Error("invalid gguidePassive: expected boolean");
     }
-    if (config.gguideTargets !== undefined && (!Array.isArray(config.gguideTargets) || config.gguideTargets.some(target =>
-        !target || !channelTypes.includes(target.channelType) ||
-        typeof target.channel !== "string" || !target.channel.length ||
-        !Number.isInteger(target.serviceId) || target.serviceId < 1 || target.serviceId > 65535 ||
-        (target.durationSeconds !== undefined && (!Number.isInteger(target.durationSeconds) || target.durationSeconds < 1 || target.durationSeconds > 1800))))) {
-        throw new Error("invalid gguideTargets: expected channelType/channel/serviceId and durationSeconds 1-1800");
+    if (config.gguideDurationSeconds !== undefined && (!Number.isInteger(config.gguideDurationSeconds) || config.gguideDurationSeconds < 1 || config.gguideDurationSeconds > 1800)) {
+        throw new Error("invalid gguideDurationSeconds: expected 1-1800");
     }
     if (config.gguidePreserveModules !== undefined && typeof config.gguidePreserveModules !== "boolean") {
         throw new Error("invalid gguidePreserveModules: expected boolean");

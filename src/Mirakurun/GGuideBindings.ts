@@ -194,7 +194,7 @@ function parseF8(record: GGuideBindingRecord): GGuideBinding | undefined {
     if (!role) { return; }
     const members: GGuideBindingMember[] = record.assets.map((asset, order) => ({
         role, objectId, assetId: assetId(asset), mimeType: asset.mimeType, imageOffset: asset.imageOffset,
-        order: role === "top" ? slot : order,
+        order: role === "top" ? slot : order
     }));
     // detail.gss is received local material as well but is not an image asset.
     if (members.length === 0) {
