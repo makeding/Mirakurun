@@ -101,6 +101,18 @@ test("all stream endpoints honor decode and format at the HTTP boundary", async 
         "/programs/11001010001/stream",
         "/streamids/11/500/stream"
     ];
+    // Consumer capability discovery must see the actual HTTP OpenAPI response,
+    // including parameters exported at the path level by express-openapi.
+    const docsResponse = await fetch(base + "/docs");
+    assert.equal(docsResponse.status, 200);
+    const docs = await docsResponse.json();
+    assert.equal(docs.basePath, "/api");
+    for (const path of ["/services/{id}/stream", "/programs/{id}/stream"]) {
+        const operation = docs.paths[path];
+        const parameters = [...(operation.parameters || []), ...(operation.get.parameters || [])];
+        const format = parameters.find(parameter => parameter.in === "query" && parameter.name === "format");
+        assert.deepEqual(format.enum, ["ts", "tlv"], path);
+    }
     for (const path of paths) {
         const { response, body } = await get(`${path}?decode=0&format=ts`);
         assert.equal(response.status, 200, path);
@@ -122,6 +134,13 @@ test("all stream endpoints honor decode and format at the HTTP boundary", async 
     assert.equal(tlvResponse.response.status, 200);
     assert.equal(tlvResponse.response.headers.get("content-type"), "application/octet-stream");
     assert.deepEqual(tlvResponse.body, tlv);
+
+    const decodedTlv = await get("/services/1100101/stream?decode=1&format=tlv");
+    assert.equal(decodedTlv.response.status, 200);
+    assert.equal(decodedTlv.response.headers.get("content-type"), "application/octet-stream");
+    assert.deepEqual(decodedTlv.body, tlv);
+    assert.equal(calls.at(-1).disableDecoder, false);
+    assert.equal(calls.at(-1).outputFormat, "tlv");
 
     sourceFormat.value = "ts";
     const decoded = await get("/services/1100101/stream?decode=1&format=ts");

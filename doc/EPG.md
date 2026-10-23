@@ -79,6 +79,26 @@ TLV for decode=0); new configurations use `defaultTlvStreamFormat` (TLV by defau
 Legacy combined decryption/conversion commands retain their deployed semantics;
 independent control requires separate decoder/converter commands.
 
+### Playback and recording consumers
+
+HonomiTV and EPGStation keep using service/program streams, rather than whole
+StreamID streams. Consumers discover explicit container support from `/api/docs`:
+the relevant stream operation must declare a query `format` enum containing
+`ts` and `tlv` (path-level or GET parameters). Product names and version strings
+are not a capability signal. Old Mirakurun and mirakc deployments without this
+declaration retain their existing decode-only request behavior. Discovery is
+bounded and cached briefly; transport failures must not disable support forever.
+
+Native MMTS playback and recording request `decode=1&format=tlv` when supported;
+TS consumers request `format=ts` while preserving their independent decode
+choice. Native MMTS on older servers retains `decode=0` to bypass legacy
+combined conversion. Explicit raw archival can still request `decode=0`.
+A 406 response is a format/configuration error and must not silently fall back
+to a different container. B61 decryption still requires a configured
+`tlvDecoder`; declaring format support does not imply a smart card is available.
+Optional service `streamId` values may populate consumer transport-stream
+metadata; missing values must not erase known historical metadata.
+
 Channels expose TER/SAT/CATV/HIKARI routes and observed network/StreamID maps.
 Service and program identities remain network/service/event based. Service access
 tries observed routes while enforcing each channel's allowedTuners, each tuner's
