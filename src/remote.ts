@@ -14,6 +14,7 @@
    limitations under the License.
 */
 import * as apid from "../api";
+import { channelRoutes } from "./Mirakurun/common";
 import Client from "./client";
 import { IncomingMessage } from "http";
 import { REMOTE_EXIT_CHANNEL_UNAVAILABLE, REMOTE_EXIT_SOURCE_UNAVAILABLE } from "./remoteExitCodes";
@@ -30,7 +31,9 @@ const opt = {
     type: process.argv[4] as apid.ChannelType,
     channel: process.argv[5],
     decode: process.argv.includes("decode") === true,
-    allowNested: process.argv.includes("allow-nested") === true
+    allowNested: process.argv.includes("allow-nested") === true,
+    route: channelRoutes.find(route => process.argv.includes(`route=${route}`)),
+    format: (process.argv.includes("format=tlv") ? "tlv" : process.argv.includes("format=ts") ? "ts" : undefined) as apid.StreamFormat | undefined
 };
 
 console.error("remote:", opt);
@@ -45,7 +48,9 @@ client.userAgent = "Mirakurun (Remote)";
 client.getChannelStream({
     type: opt.type,
     channel: opt.channel,
+    route: opt.route,
     decode: opt.decode,
+    format: opt.format,
     localTunerOnly: opt.allowNested === false
 })
     .then(_stream => {

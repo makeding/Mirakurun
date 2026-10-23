@@ -88,3 +88,56 @@ it("replaces PCR and CA PIDs while retaining all current ES and their CA descrip
     x.f.write(Buffer.concat([0x1ff, 0x1000, 0x1001, 0x2ff, 0x1002, 0x1003, 0x200, 0x210].map(pid => packet(pid))));
     assert.deepEqual(x.take(), [0x2ff, 0x1002, 0x1003, 0x200, 0x210]);
 });
+
+it("resolves CATV ESS from PAT/NIT and parses its logo elementary stream", t => {
+    const originalService = shared.service;
+    shared.service = {
+        get() { return null; },
+        findByNetworkId() { return []; }
+    };
+    const f = new TSFilter({ networkId: 65534, output: new Writable({ write(chunk, encoding, done) { done(); } }) });
+    t.after(() => { f.close(); shared.service = originalService; });
+
+    f._onPAT(0, {
+        transport_stream_id: 0x1234,
+        programs: [{ program_number: 0, network_PID: 0x10 }, { program_number: 0x2222, program_map_PID: 0x234 }]
+    });
+    f._onNIT(0x10, {
+        network_id: 65534,
+        network_descriptors: [{ descriptor_tag: 0x40, network_name_char: Buffer.from("CATV") }],
+        transport_streams: [{ transport_stream_id: 0x1234, transport_descriptors: [{
+            descriptor_tag: 0x41,
+            services: [{ service_id: 0x2222, service_type: 0xA4 }]
+        }] }]
+    });
+    assert.equal(f._essMap.get(0x2222), 0x234);
+    assert.ok(f._parsePids.has(0x234));
+
+    f._onPMT(0x234, {
+        program_number: 0x2222,
+        streams: [{ elementary_PID: 0x345, ES_info: [{ descriptor_tag: 0x52, component_tag: 0x79 }] }]
+    });
+    assert.ok(f._essEsPids.has(0x345));
+    assert.ok(f._parsePids.has(0x345));
+});
+
+it("accepts CATV and JC-HITS DSM-CC logo module names", t => {
+    const f = new TSFilter({ networkId: 65534, output: new Writable({ write(chunk, encoding, done) { done(); } }) });
+    t.after(() => f.close());
+
+    for (const [downloadId, name] of [[1, "CATV_LOGO-05"], [2, "JCHITS_LOGO-05"]]) {
+        f._onDSMCC(0, {
+            table_id: 0x3B,
+            message: {
+                downloadId,
+                modules: [{
+                    moduleId: 1,
+                    moduleVersion: 1,
+                    moduleSize: 1,
+                    moduleInfo: [{ descriptor_tag: 0x02, text_char: Buffer.from(name) }]
+                }]
+            }
+        });
+        assert.ok(f._dlDataMap.has(downloadId), name);
+    }
+});

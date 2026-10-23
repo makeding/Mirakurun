@@ -267,6 +267,10 @@ export async function loadServer(): Promise<Server> {
         config.allowIPv6CidrRanges = validRanges;
     }
 
+    if (config.defaultTlvStreamFormat !== undefined && config.defaultTlvStreamFormat !== "ts" && config.defaultTlvStreamFormat !== "tlv") {
+        log.error("invalid server config property `defaultTlvStreamFormat`, using tlv");
+        delete config.defaultTlvStreamFormat;
+    }
     return config as Readonly<Server>;
 }
 

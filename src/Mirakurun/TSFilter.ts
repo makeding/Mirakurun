@@ -24,11 +24,8 @@ import _ from "./_";
 import { getProgramItemId } from "./Program";
 import Service from "./Service";
 import ServiceItem from "./ServiceItem";
-import ChannelItem from "./ChannelItem";
-import TLVFilter from "./TLVFilter";
 
 interface TSFilterOptions {
-    readonly detectTLV?: ChannelItem;
     readonly output?: Writable;
     readonly passthrough?: boolean;
 
@@ -38,7 +35,6 @@ interface TSFilterOptions {
     readonly parseNIT?: boolean;
     readonly parseSDT?: boolean;
     readonly parseEIT?: boolean;
-    readonly tsmfRelTs?: number;
 }
 
 const PACKET_SIZE = 188;
@@ -61,6 +57,11 @@ const DSMCC_BLOCK_SIZE = 4066; // ARIB TR-B15
 
 const LOGO_DATA_NAME_BS = Buffer.from("LOGO-05"); // ARIB STD-B21, ARIB TR-B15
 const LOGO_DATA_NAME_CS = Buffer.from("CS_LOGO-05"); // ARIB STD-B21, ARIB TR-B15
+const LOGO_DATA_NAME_CATV = Buffer.from("CATV_LOGO-05"); // J:COM
+const LOGO_DATA_NAME_JCHITS = Buffer.from("JCHITS_LOGO-05"); // JC-HITS and JCC ACAS
+
+// Cable Television Network IDs (ARIB STD-B10)
+const catvNetworkIds = [65527, 65529, 65530, 65533, 65534, 65535];
 
 interface BasicExtState {
     basic: {
@@ -92,12 +93,6 @@ interface DownloadData {
 export default class TSFilter extends EventEmitter {
     streamInfo: StreamInfo = {};
 
-    private _options: TSFilterOptions;
-    private _inputDetected = false;
-    private _countsStream = true;
-    private _detectBuffer: Buffer = Buffer.alloc(0);
-    private _tlvFilter: TLVFilter;
-
     // output
     private _output: Writable;
 
@@ -110,12 +105,6 @@ export default class TSFilter extends EventEmitter {
     private _targetNetworkId: number;
     private _enableParseCDT = false;
     private _enableParseDSMCC = false;
-
-    // tsmf
-    private _tsmfEnableTsmfSplit = false;
-    private _tsmfSlotCounter = -1;
-    private _tsmfRelativeStreamNumber: number[] = [];
-    private _tsmfTsNumber = 0;
 
     // aribts
     private _parser = new TsStreamLite();
@@ -139,13 +128,29 @@ export default class TSFilter extends EventEmitter {
     private _providePids: Set<number> = null; // `null` to provides all
     private _parsePids = new Set<number>();
     private _tsid = -1;
+    private _streamInfoEmitted = false;
     private _serviceIds = new Set<number>();
     private _parseServiceIds = new Set<number>();
     private _pmtPid = -1;
     private _streamTime: number = null;
+    private _patMap = new Map<number, number>(); // <serviceId, pmtPid>
     private _essMap = new Map<number, number>(); // <serviceId, pid>
     private _essEsPids = new Set<number>();
+    private _networkName = "";
     private _dlDataMap = new Map<number, DownloadData>();
+    private _cdtDataMap = new Map<string, {
+        networkId: number;
+        logoId: number;
+        preferredLogoType: number;
+        savedLogoType: number | null;
+        receivingData: Map<string, {
+            logoType: number;
+            lastSectionNumber: number;
+            receivedSections: Set<number>;
+            sections: Map<number, Buffer>;
+        }>;
+    }>();
+    private _logoDataReady = false;
     private _logoDataTimer: NodeJS.Timeout;
     private _provideEventLastDetectedAt = -1;
     private _provideEventTimeout: NodeJS.Timeout = null;
@@ -161,15 +166,7 @@ export default class TSFilter extends EventEmitter {
 
     constructor(options: TSFilterOptions) {
         super();
-        this._options = options;
-        this._inputDetected = !options.detectTLV;
-
-        const enabletsmf = options.tsmfRelTs || 0;
         this._passthrough = options.passthrough === true;
-        if (enabletsmf !== 0) {
-                this._tsmfEnableTsmfSplit = true;
-                this._tsmfTsNumber = options.tsmfRelTs;
-        }
 
         this._targetNetworkId = options.networkId || null;
         this._provideServiceId = options.serviceId || null;
@@ -221,8 +218,9 @@ export default class TSFilter extends EventEmitter {
         }
 
         if (this._targetNetworkId && this._passthrough === false) {
-            if (this._targetNetworkId === 4) { // ARIB TR-B15 (BS/CS)
+            if (this._targetNetworkId === 4 || catvNetworkIds.includes(this._targetNetworkId)) { // ARIB TR-B15 (BS/CS or CATV)
                 this._enableParseDSMCC = true;
+                this._parseNIT = true;
             } else {
                 this._enableParseCDT = true;
             }
@@ -254,49 +252,6 @@ export default class TSFilter extends EventEmitter {
     write(chunk: Buffer): void {
         if (this._closed) {
             throw new Error("TSFilter has closed already");
-        }
-
-        if (!this._inputDetected) {
-            const buffered = this._detectBuffer.length > 0 ? Buffer.concat([this._detectBuffer, chunk]) : chunk;
-            // A BS4K command may supply original TLV or already converted TS.
-            // Buffer at most one maximum-sized TLV packet plus its next header.
-            for (let i = 0; i + 4 <= buffered.length; i++) {
-                if (buffered[i] === 0x47 &&
-                    ((i === 0 && buffered.length >= 188 && buffered.length < 376) ||
-                        (i + 188 < buffered.length && buffered[i + 188] === 0x47))) {
-                    this._inputDetected = true;
-                    break;
-                }
-                if (buffered[i] === 0x7F && [1, 2, 3, 0xFE, 0xFF].includes(buffered[i + 1])) {
-                    this._inputDetected = true;
-                    const options = this._options;
-                    clearTimeout(this._provideEventTimeout);
-                    this._provideEventTimeout = null;
-                    this._tlvFilter = new TLVFilter({ ...options, channelItem: options.detectTLV });
-                    --status.streamCount.tsFilter;
-                    this._countsStream = false;
-                    this.streamInfo = this._tlvFilter.streamInfo;
-                    for (const event of ["network", "networkStreams", "streamInfo", "services", "epgReady"]) {
-                        this._tlvFilter.on(event, (...args: any[]) => this.emit(event, ...args));
-                    }
-                    this._tlvFilter.once("close", () => this._close("tlv:close"));
-                    break;
-                }
-            }
-            if (!this._inputDetected) {
-                if (buffered.length > 65539) {
-                    this._close("unrecognized-bs4k-input");
-                } else {
-                    this._detectBuffer = Buffer.from(buffered);
-                }
-                return;
-            }
-            this._detectBuffer = Buffer.alloc(0);
-            chunk = buffered;
-        }
-        if (this._tlvFilter) {
-            this._tlvFilter.write(chunk);
-            return;
         }
 
         if (this._passthrough === true) {
@@ -370,35 +325,6 @@ export default class TSFilter extends EventEmitter {
 
         for (let packet of packets) {
             const pid = packet.readUInt16BE(1) & 0x1FFF;
-
-            // tsmf
-            if (this._tsmfEnableTsmfSplit) {
-                if (pid === 0x002F) {
-                    const tsmfFlameSync = packet.readUInt16BE(4) & 0x1FFF;
-                    if (tsmfFlameSync !== 0x1A86 && tsmfFlameSync !== 0x0579) {
-                        continue;
-                    }
-
-                    this._tsmfRelativeStreamNumber = [];
-                    for (let i = 0; i < 26; i++) {
-                        this._tsmfRelativeStreamNumber.push((packet[73 + i] & 0xf0) >> 4);
-                        this._tsmfRelativeStreamNumber.push(packet[73 + i] & 0x0f);
-                    }
-
-                    this._tsmfSlotCounter = 0;
-                    continue;
-                }
-
-                if (this._tsmfSlotCounter < 0 || this._tsmfSlotCounter > 51) {
-                    continue;
-                }
-
-                this._tsmfSlotCounter++;
-
-                if (this._tsmfRelativeStreamNumber[this._tsmfSlotCounter - 1] !== this._tsmfTsNumber) {
-                    continue;
-                }
-            }
 
             // NULL
             if (pid === 0x1FFF) {
@@ -474,6 +400,7 @@ export default class TSFilter extends EventEmitter {
 
     private _onPAT(pid: number, data: any): void {
         this._tsid = data.transport_stream_id;
+        this._patMap = new Map<number, number>();
         this._serviceIds = new Set();
         this._parseServiceIds = new Set();
 
@@ -491,18 +418,7 @@ export default class TSFilter extends EventEmitter {
                 continue;
             }
 
-            // detect ESS PMT PID
-            if (
-                // for future use
-                // (this._targetNetworkId !== 4 && serviceId >= 0xFFF0 && serviceId <= 0xFFF5) || // ARIB TR-B14 (GR)
-                (this._targetNetworkId === 4 && serviceId === 929) // ARIB TR-B15 (BS/CS)
-            ) {
-                const essPmtPid = program.program_map_PID;
-                this._essMap.set(serviceId, essPmtPid);
-
-                log.debug("TSFilter#_onPAT: detected ESS PMT PID=%d as serviceId=%d", essPmtPid, serviceId);
-                continue;
-            }
+            this._patMap.set(serviceId, program.program_map_PID);
 
             this._serviceIds.add(serviceId);
 
@@ -571,6 +487,16 @@ export default class TSFilter extends EventEmitter {
                 this._parsePids.add(0x11);
             }
         }
+
+        if (this._enableParseDSMCC) {
+            for (const [serviceId, pmtPid] of this._patMap) {
+                const item = this._targetNetworkId !== null && _.service.get(this._targetNetworkId, serviceId);
+                if (!item && !this._essMap.has(serviceId)) {
+                    this._essMap.set(serviceId, pmtPid);
+                    this._parsePids.add(pmtPid);
+                }
+            }
+        }
     }
 
     private _onPMT(pid: number, data: any): void {
@@ -579,7 +505,7 @@ export default class TSFilter extends EventEmitter {
                 for (const descriptor of stream.ES_info) {
                     if (descriptor.descriptor_tag === 0x52) { // stream identifier descriptor
                         if (
-                            descriptor.component_tag === 0x79 || // ARIB TR-B15 (BS)
+                            descriptor.component_tag === 0x79 || // ARIB TR-B15 (BS, CATV)
                             descriptor.component_tag === 0x7A // ...? (CS)
                         ) {
                             this._parsePids.add(stream.elementary_PID);
@@ -629,24 +555,46 @@ export default class TSFilter extends EventEmitter {
     private _onNIT(pid: number, data: any): void {
         const _network = {
             networkId: data.network_id,
+            name: "",
             areaCode: -1,
-            remoteControlKeyId: -1
+            remoteControlKeyId: -1,
+            essServiceIds: []
         };
 
-        if (data.transport_streams[0]) {
-            for (const desc of data.transport_streams[0].transport_descriptors) {
-                switch (desc.descriptor_tag) {
-                    case 0xFA:
-                        _network.areaCode = desc.area_code;
-                        break;
-                    case 0xCD:
-                        _network.remoteControlKeyId = desc.remote_control_key_id;
-                        break;
+        if (data.network_descriptors) {
+            for (const desc of data.network_descriptors) {
+                if (desc.descriptor_tag === 0x40) {
+                    this._networkName = new TsChar(desc.network_name_char).decode();
+                }
+            }
+        }
+        _network.name = this._networkName;
+
+        if (data.transport_streams && this._tsid !== -1) {
+            const targetTS = data.transport_streams.find(ts => ts.transport_stream_id === this._tsid);
+            if (targetTS?.transport_descriptors) {
+                for (const desc of targetTS.transport_descriptors) {
+                    switch (desc.descriptor_tag) {
+                        case 0xFA:
+                            _network.areaCode = desc.area_code;
+                            break;
+                        case 0xCD:
+                            _network.remoteControlKeyId = desc.remote_control_key_id;
+                            break;
+                        case 0x41:
+                            for (const service of desc.services) {
+                                if (service.service_type === 0xA4) {
+                                    _network.essServiceIds.push(service.service_id);
+                                }
+                            }
+                            break;
+                    }
                 }
             }
         }
 
         this.emit("network", _network);
+        this._resolveEssServices(_network.essServiceIds, _network.name);
 
         if (this._parsePids.has(pid)) {
             this._parsePids.delete(pid);
@@ -696,6 +644,11 @@ export default class TSFilter extends EventEmitter {
             }
         }
 
+        // StreamFilter records this before the discovered services.
+        if (!this._streamInfoEmitted && this._tsid !== -1) {
+            this._streamInfoEmitted = true;
+            this.emit("streamInfo", { tsid: this._tsid, networkId: data.original_network_id });
+        }
         this.emit("services", _services);
 
         if (this._parsePids.has(pid)) {
@@ -744,6 +697,7 @@ export default class TSFilter extends EventEmitter {
                 this._epg = new EPG();
 
                 // Logo
+                this._logoDataReady = true;
                 this._standbyLogoData();
             }
 
@@ -761,19 +715,87 @@ export default class TSFilter extends EventEmitter {
         this._streamTime = getTimeFromMJD(data.JST_time);
     }
 
-    private _onCDT(pid: number, data: any): void {
-        if (data.data_type === 0x01) {
-            // Logo
-            const dataModule = new tsDataModule.TsDataModuleCdtLogo(data.data_module_byte).decode();
-            if (dataModule.logo_type !== 0x05) {
-                return;
-            }
-
-            log.debug("TSFilter#_onCDT: received logo data (networkId=%d, logoId=%d)", data.original_network_id, dataModule.logo_id);
-
-            const logoData = TsLogo.decode(dataModule.data_byte);
-            Service.saveLogoData(data.original_network_id, dataModule.logo_id, logoData);
+    private async _onCDT(pid: number, data: any): Promise<void> {
+        if (data.data_type !== 0x01) {
+            return;
         }
+
+        const dataModule = new tsDataModule.TsDataModuleCdtLogo(data.data_module_byte).decode();
+        const logoType: number = dataModule.logo_type;
+        if (logoType !== 0x05 && logoType !== 0x07) {
+            return;
+        }
+
+        const networkId: number = data.original_network_id;
+        const logoId: number = dataModule.logo_id;
+        const logoKey = `${networkId}_${logoId}`;
+        const downloadDataId: number = data.download_data_id;
+        const sectionNumber: number = data.section_number;
+        const lastSectionNumber: number = data.last_section_number;
+
+        let logoData = this._cdtDataMap.get(logoKey);
+        if (!logoData) {
+            logoData = {
+                networkId,
+                logoId,
+                preferredLogoType: logoType,
+                savedLogoType: null,
+                receivingData: new Map()
+            };
+            this._cdtDataMap.set(logoKey, logoData);
+        }
+
+        if (logoType > logoData.preferredLogoType) {
+            for (const [key, receiving] of logoData.receivingData.entries()) {
+                if (receiving.logoType < logoType) {
+                    logoData.receivingData.delete(key);
+                }
+            }
+            logoData.preferredLogoType = logoType;
+        }
+        if (logoType < logoData.preferredLogoType ||
+            (logoData.savedLogoType !== null && logoData.savedLogoType >= logoType)) {
+            return;
+        }
+
+        if (logoData.savedLogoType === null) {
+            const existingLogoType = await Service.getLogoType(networkId, logoId);
+            if (existingLogoType !== null) {
+                logoData.savedLogoType = existingLogoType;
+                if (existingLogoType >= logoType) {
+                    return;
+                }
+            }
+        }
+
+        const receivingKey = `${downloadDataId}_${logoType}`;
+        let receiving = logoData.receivingData.get(receivingKey);
+        if (!receiving) {
+            receiving = {
+                logoType,
+                lastSectionNumber,
+                receivedSections: new Set<number>(),
+                sections: new Map<number, Buffer>()
+            };
+            logoData.receivingData.set(receivingKey, receiving);
+        }
+        receiving.receivedSections.add(sectionNumber);
+        receiving.sections.set(sectionNumber, dataModule.data_byte);
+
+        const combinedData = Buffer.concat(Array.from(receiving.sections.entries())
+            .sort((a, b) => a[0] - b[0]).map(([, buf]) => buf));
+        const pngSignature = Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
+        const iendSignature = Buffer.from([0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82]);
+        if (combinedData.length < 16 || !combinedData.subarray(0, 8).equals(pngSignature) ||
+            !combinedData.subarray(-8).equals(iendSignature)) {
+            return;
+        }
+
+        logoData.receivingData.delete(receivingKey);
+        logoData.savedLogoType = logoType;
+        log.debug("TSFilter#_onCDT: received logo data (networkId=%d, logoId=%d, logoType=0x%s, size=%d)",
+            networkId, logoId, logoType.toString(16).padStart(2, "0"), combinedData.length);
+        Service.saveLogoData(networkId, logoId, logoType === 0x05 ? TsLogo.decode(combinedData) : combinedData);
     }
 
     private _onDSMCC(pid: number, data: any): void {
@@ -841,10 +863,12 @@ export default class TSFilter extends EventEmitter {
                     if (descriptor.descriptor_tag !== 0x02) {
                         continue;
                     }
-                    // find LOGO-05 or CS_LOGO-05
+                    // find LOGO-05, CS_LOGO-05, CATV_LOGO-05, or JCHITS_LOGO-05
                     if (
                         !LOGO_DATA_NAME_BS.equals(descriptor.text_char) &&
-                        !LOGO_DATA_NAME_CS.equals(descriptor.text_char)
+                        !LOGO_DATA_NAME_CS.equals(descriptor.text_char) &&
+                        !LOGO_DATA_NAME_CATV.equals(descriptor.text_char) &&
+                        !LOGO_DATA_NAME_JCHITS.equals(descriptor.text_char)
                     ) {
                         continue;
                     }
@@ -879,8 +903,30 @@ export default class TSFilter extends EventEmitter {
         this._close("event-timeout");
     }
 
+    private _resolveEssServices(essServiceIds?: number[], networkName?: string): void {
+        if (!essServiceIds || essServiceIds.length === 0) {
+            return;
+        }
+        for (const serviceId of essServiceIds) {
+            const pmtPid = this._patMap.get(serviceId);
+            if (pmtPid === undefined) {
+                continue;
+            }
+            this._essMap.set(serviceId, pmtPid);
+            this._parsePids.add(pmtPid);
+            log.info("TSFilter#_resolveEssServices: resolved ESS service (serviceId=%d, PMT PID=%d, network='%s')",
+                serviceId, pmtPid, networkName);
+        }
+        if (this._logoDataReady && this._essMap.size > 0) {
+            this._standbyLogoData();
+        }
+    }
+
     private async _standbyLogoData(): Promise<void> {
         if (this._closed) {
+            return;
+        }
+        if (!this._logoDataReady) {
             return;
         }
         if (this._logoDataTimer) {
@@ -902,6 +948,8 @@ export default class TSFilter extends EventEmitter {
                 ..._.service.findByNetworkId(6),
                 ..._.service.findByNetworkId(7)
             );
+        } else if (this._enableParseDSMCC && catvNetworkIds.includes(this._targetNetworkId)) {
+            targetServices.push(..._.service.findByNetworkId(this._targetNetworkId));
         }
 
         const logoIdNetworkMap: { [networkId: number]: Set<number> } = {};
@@ -948,8 +996,8 @@ export default class TSFilter extends EventEmitter {
                         }, 1000 * 60 * 30); // 30 mins
 
                         log.info("TSFilter#_standbyLogoData: waiting for logo data for 30 minutes... (networkId=%d, logoId=%d)", this._targetNetworkId, logoId);
-                    } else if (this._enableParseDSMCC) {
-                        // for BS/CS
+                    } else if (this._enableParseDSMCC && this._essMap.size > 0) {
+                        // for BS/CS/CATV
                         for (const essPmtPid of this._essMap.values()) {
                             this._parsePids.add(essPmtPid); // ESS PMT PID
                         }
@@ -966,10 +1014,18 @@ export default class TSFilter extends EventEmitter {
                             }
                             this._parser.removeAllListeners("dsmcc");
 
-                            log.info("TSFilter#_standbyLogoData: stopped waiting for logo data (networkId=[4,6,7])");
+                            if (this._targetNetworkId === 4) {
+                                log.info("TSFilter#_standbyLogoData: stopped waiting for logo data (networkId=[4,6,7])");
+                            } else {
+                                log.info("TSFilter#_standbyLogoData: stopped waiting for logo data (networkId=[%d])", this._targetNetworkId);
+                            }
                         }, 1000 * 60 * 30); // 30 mins
 
-                        log.info("TSFilter#_standbyLogoData: waiting for logo data for 30 minutes... (networkId=[4,6,7])");
+                        if (this._targetNetworkId === 4) {
+                            log.info("TSFilter#_standbyLogoData: waiting for logo data for 30 minutes... (networkId=[4,6,7])");
+                        } else {
+                            log.info("TSFilter#_standbyLogoData: waiting for logo data for 30 minutes... (networkId=[%d])", this._targetNetworkId);
+                        }
                     }
 
                     return; // break all loops
@@ -1107,10 +1163,6 @@ export default class TSFilter extends EventEmitter {
         }
         this._closeReason = reason;
         this._closed = true;
-        this._tlvFilter?.close();
-        this._tlvFilter = undefined;
-        this._detectBuffer = undefined;
-        this._options = undefined;
 
         // clear timer
         clearTimeout(this._provideEventTimeout);
@@ -1158,9 +1210,7 @@ export default class TSFilter extends EventEmitter {
         // clear streamInfo
         delete this.streamInfo;
 
-        if (this._countsStream) {
-            --status.streamCount.tsFilter;
-        }
+        --status.streamCount.tsFilter;
 
         log.info("TSFilter#_close: closed (serviceId=%s, eventId=%s, reason=%s)", formatNullableId(this._provideServiceId), formatNullableId(this._provideEventId), this._closeReason);
 

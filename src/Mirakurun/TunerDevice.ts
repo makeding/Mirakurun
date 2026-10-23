@@ -27,6 +27,7 @@ import Event from "./Event";
 import ChannelItem from "./ChannelItem";
 import _ from "./_";
 import TSFilter from "./TSFilter";
+import StreamFilter from "./StreamFilter";
 import Client, { ProgramsQuery } from "../client";
 import { REMOTE_EXIT_CHANNEL_UNAVAILABLE } from "../remoteExitCodes";
 import { TSHandoffBuffer, TSHandoffOptions, TSHandoffProbe } from "./TSHandoff";
@@ -42,8 +43,22 @@ export class TunerStartupError extends Error {
     }
 }
 
+interface StreamSink {
+    readonly closed: boolean;
+    write(chunk: Buffer): boolean | void;
+    close(): void;
+    end(): void;
+    once(event: "close", listener: () => void): unknown;
+    syncPriorities?(priority: number): void;
+    releaseTsmfCarriers?(): void;
+}
+
 interface User extends common.User {
-    _stream?: TSFilter | TSHandoffBuffer;
+    _stream?: StreamSink;
+}
+
+interface StartStreamOptions {
+    suppressGroupCombine?: boolean;
 }
 
 export interface TunerDeviceStatus {
@@ -67,6 +82,8 @@ export default class TunerDevice extends EventEmitter {
     private _mmtsDecoderProcess: child_process.ChildProcess = null;
     private _stream: stream.Readable = null;
     private _streamUsesMMTSDecoder = false;
+    private _remoteDecode: boolean | null = null;
+    private _remoteOutputFormat: apid.StreamFormat | undefined;
 
     private _users = new Set<User>();
     private _handoffProbe: TSHandoffProbe = null;
@@ -157,6 +174,10 @@ export default class TunerDevice extends EventEmitter {
         return this._isFault;
     }
 
+    get isAdditionalCarrier(): boolean {
+        return [...this._users].some(user => user.id === "Mirakurun:addCarrier()");
+    }
+
     get lastDataAt(): number {
         return this._lastDataAt;
     }
@@ -165,12 +186,23 @@ export default class TunerDevice extends EventEmitter {
         return this._config.checkDevicePath || this._config.dvbDevicePath || null;
     }
 
-    canReuseStream(channel: ChannelItem, disableDecoder: boolean, disableMMTSDecoder = disableDecoder): boolean {
-        if (this._channel !== channel) {
+    canReuseStream(
+        channel: ChannelItem,
+        disableDecoder: boolean,
+        disableMMTSDecoder = disableDecoder,
+        outputFormat?: apid.StreamFormat
+    ): boolean {
+        if (this._channel !== channel || this._canUseChannel(channel) === false) {
             return false;
         }
         if (this._canFanoutMMTSDecoder(channel) === true) {
             return true;
+        }
+
+        if (this._isRemote &&
+            (this._remoteDecode !== this._remoteDecodeFor(disableDecoder) ||
+                this._remoteOutputFormat !== outputFormat)) {
+            return false;
         }
 
         return this._streamUsesMMTSDecoder === this._shouldUseMMTSDecoder(channel, disableMMTSDecoder);
@@ -192,10 +224,10 @@ export default class TunerDevice extends EventEmitter {
         if (this._handoffInProgress || device._handoffInProgress || device === this) {
             return false;
         }
-        if (this.isUsing === false || this._channel === null) {
+        if (this.isUsing === false || this._channel === null || this._hasDetectedNonTsStream()) {
             return false;
         }
-        if (device.isFree === false || device.config.types.includes(this._channel.type) === false || device.canStartStream(this._channel) === false) {
+        if (device.isFree === false || device.canStartStream(this._channel) === false) {
             return false;
         }
         if (priority >= 0 && this.getPriority() > priority) {
@@ -209,7 +241,7 @@ export default class TunerDevice extends EventEmitter {
         if (ignoreAvailability === false && this._isAvailable === false) {
             return false;
         }
-        if (channel && this._config.types.includes(channel.type) === false) {
+        if (channel && this._canUseChannel(channel) === false) {
             return false;
         }
         if (this._cooldownUntil > Date.now()) {
@@ -246,7 +278,7 @@ export default class TunerDevice extends EventEmitter {
         await this._kill(true);
     }
 
-    async startStream(user: User, stream: TSFilter, channel?: ChannelItem, recoverUnavailable = false): Promise<void> {
+    async startStream(user: User, stream: StreamSink, channel?: ChannelItem, recoverUnavailable = false, options?: StartStreamOptions): Promise<void> {
         log.debug("TunerDevice#%d start stream for user `%s` (priority=%d)...", this._index, user.id, user.priority);
         let waitForRemoteStream = false;
 
@@ -263,8 +295,8 @@ export default class TunerDevice extends EventEmitter {
         }
 
         if (channel) {
-            if (this._config.types.includes(channel.type) === false) {
-                throw new Error(util.format("TunerDevice#%d is not supported for channel type `%s`", this._index, channel.type));
+            if (this._canUseChannel(channel) === false) {
+                throw new Error(util.format("TunerDevice#%d is not supported for channel `%s`", this._index, channel.name));
             }
 
             if (this._stream) {
@@ -277,24 +309,27 @@ export default class TunerDevice extends EventEmitter {
                     }
 
                     await this._kill(true);
-                    this._spawn(channel, user.disableMMTSDecoder === true);
+                    this._spawn(channel, user.disableMMTSDecoder === true, options, user.outputFormat, user.disableDecoder === true);
                     waitForRemoteStream = this._isRemote;
                 } else if (
-                    this._canFanoutMMTSDecoder(channel) === false &&
-                    this._streamUsesMMTSDecoder !== this._shouldUseMMTSDecoder(channel, user.disableMMTSDecoder === true)
+                    (this._canFanoutMMTSDecoder(channel) === false &&
+                        this._streamUsesMMTSDecoder !== this._shouldUseMMTSDecoder(channel, user.disableMMTSDecoder === true)) ||
+                    (this._isRemote &&
+                        (this._remoteDecode !== this._remoteDecodeFor(user.disableDecoder === true) ||
+                            this._remoteOutputFormat !== user.outputFormat))
                 ) {
                     if (this._users.size !== 0) {
                         throw new Error(util.format("TunerDevice#%d has incompatible decoder mode users", this._index));
                     }
                     await this._kill(true);
-                    this._spawn(channel, user.disableMMTSDecoder === true);
+                    this._spawn(channel, user.disableMMTSDecoder === true, options, user.outputFormat, user.disableDecoder === true);
                     waitForRemoteStream = this._isRemote;
                 }
             } else {
                 if (this.canStartStream(channel) === false) {
                     throw new Error(util.format("TunerDevice#%d device path is not available", this._index));
                 }
-                this._spawn(channel, user.disableMMTSDecoder === true);
+                this._spawn(channel, user.disableMMTSDecoder === true, options, user.outputFormat, user.disableDecoder === true);
                 waitForRemoteStream = this._isRemote;
             }
         }
@@ -308,6 +343,7 @@ export default class TunerDevice extends EventEmitter {
 
         user._stream = stream;
         this._users.add(user);
+        this._syncStreamFilterPriorities();
         if (stream.closed === true) {
             this.endStream(user);
         } else {
@@ -330,7 +366,7 @@ export default class TunerDevice extends EventEmitter {
         this._updated();
     }
 
-    endStream(user: User): void {
+    endStream(user: User, immediate = false): void {
         if (this._users.has(user) === false) {
             return;
         }
@@ -339,13 +375,18 @@ export default class TunerDevice extends EventEmitter {
 
         user._stream.end();
         this._users.delete(user);
+        this._syncStreamFilterPriorities();
 
         if (this._users.size === 0) {
-            setTimeout(() => {
-                if (this._users.size === 0 && this._process) {
-                    this._kill(true).catch(log.error);
-                }
-            }, 3000);
+            if (immediate) {
+                this._kill(true).catch(log.error);
+            } else {
+                setTimeout(() => {
+                    if (this._users.size === 0 && this._process) {
+                        this._kill(true).catch(log.error);
+                    }
+                }, 3000);
+            }
         }
 
         log.info("TunerDevice#%d end streaming to user `%s` (priority=%d)", this._index, user.id, user.priority);
@@ -480,7 +521,13 @@ export default class TunerDevice extends EventEmitter {
         return programs;
     }
 
-    private _spawn(ch: ChannelItem, disableMMTSDecoder = false): void {
+    private _spawn(
+        ch: ChannelItem,
+        disableMMTSDecoder = false,
+        _options?: StartStreamOptions,
+        outputFormat?: apid.StreamFormat,
+        disableDecoder = false
+    ): void {
         log.debug("TunerDevice#%d spawn...", this._index);
 
         if (this._process) {
@@ -495,11 +542,14 @@ export default class TunerDevice extends EventEmitter {
             cmd += " " + (this._config.remoteMirakurunPort || 40772);
             cmd += " " + common.getTuningChannelType(ch.type);
             cmd += " " + ch.channel;
-            if (this._config.remoteMirakurunDecoder === true) {
+            if (this._remoteDecodeFor(disableDecoder)) {
                 cmd += " decode";
             }
             if (this._config.remoteMirakurunAllowNested === true) {
                 cmd += " allow-nested";
+            }
+            if (outputFormat) {
+                cmd += " format=" + outputFormat;
             }
         } else {
             cmd = ch.type === "BS4K" && this._config.commandBS4K ? this._config.commandBS4K : this._config.command;
@@ -509,6 +559,7 @@ export default class TunerDevice extends EventEmitter {
             channel: ch.channel,
             type: common.getTuningChannelType(ch.type),
             channelType: ch.type,
+            route: ch.route.toLowerCase(),
             satelite: ch.commandVars?.satellite || "", // deprecated, for backward compatibility
             space: 0, // default value for backward compatibility
             ...ch.commandVars
@@ -520,6 +571,8 @@ export default class TunerDevice extends EventEmitter {
         this._command = cmd;
         this._channel = ch;
         this._streamUsesMMTSDecoder = false;
+        this._remoteDecode = this._isRemote ? this._remoteDecodeFor(disableDecoder) : null;
+        this._remoteOutputFormat = this._isRemote ? outputFormat : undefined;
         this._lastDataAt = 0;
         this._commandFailed = false;
 
@@ -711,6 +764,39 @@ export default class TunerDevice extends EventEmitter {
         return !!ch && !this._config.dvbDevicePath && ch.type === "BS4K" && !!this._config.mmtsDecoder;
     }
 
+    private _remoteDecodeFor(disableDecoder: boolean): boolean {
+        return this._config.remoteMirakurunDecoder === true && disableDecoder !== true;
+    }
+
+    private _canUseChannel(channel: ChannelItem): boolean {
+        if (this._config.types.includes(channel.type) === false) {
+            return false;
+        }
+        if (channel.allowedTuners !== undefined && !channel.allowedTuners.includes(this._config.name)) {
+            return false;
+        }
+        return this._config.routes === undefined || this._config.routes.length === 0 ||
+            this._config.routes.includes(channel.route);
+    }
+
+    private _hasDetectedNonTsStream(): boolean {
+        for (const user of this._users) {
+            const filter = user._stream;
+            if (filter instanceof StreamFilter &&
+                (filter.detectedFormat === "tlv" || filter.isTsmf)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private _syncStreamFilterPriorities(): void {
+        const priority = this.getPriority();
+        for (const user of this._users) {
+            user._stream?.syncPriorities?.(priority);
+        }
+    }
+
     private _waitForRemoteStream(): Promise<void> {
         const tunerProcess = this._process;
         const tunerStream = this._stream;
@@ -822,6 +908,9 @@ export default class TunerDevice extends EventEmitter {
         this._isAvailable = false;
         this._closing = close;
         this._closeMMTSDecoder();
+        for (const user of this._users) {
+            user._stream?.releaseTsmfCarriers?.();
+        }
 
         this._updated();
 

@@ -16,29 +16,76 @@
 import * as stream from "stream";
 import _ from "./_";
 import * as common from "./common";
+import { defaultRouteForType } from "./common";
 import * as apid from "../../api";
 import ServiceItem from "./ServiceItem";
-import TSFilter from "./TSFilter";
+import StreamFilter from "./StreamFilter";
+
+// streamKey: 0 = non-TSMF, 1..15 = TSMF relTs
+export interface StreamEntry {
+    streamId: number;
+    networkId: number;
+    isTlv: boolean;
+    relTs?: number;
+    serviceIds: Set<number>;
+    /** serviceIds supplied via channels.yml — locked, not overwritten at runtime. */
+    configServiceIds: Set<number>;
+}
+
+interface StreamScanSnapshot {
+    streams: Map<number, StreamEntry>;
+    tsmfRelTs: number;
+    tsmfGroupId: number;
+}
 
 export default class ChannelItem {
     readonly name: string;
     readonly type: apid.ChannelType;
+    readonly route: apid.ChannelRoute;
     readonly channel: string;
-    readonly tsmfRelTs: number;
     readonly commandVars: apid.ConfigChannelsItem["commandVars"];
     allowedTuners: string[] | undefined;
     #configuredAllowedTuners: string[] | undefined;
     #remoteAllowedTuners: string[] | undefined;
 
+    private _tsmfRelTs: number;
+    private _configTsmfRelTs: boolean;
+    private _tsmfGroupId: number;
+    private _configTsmfGroupId: boolean;
+    private _streams = new Map<number, StreamEntry>();
+    private _streamScanSnapshot?: StreamScanSnapshot;
+    private _scanStreamKeys?: Set<number>;
+    private _scanServiceIds?: Map<number, Set<number>>;
+    private _scanGroupIdObserved = false;
+
     constructor(config: apid.ConfigChannelsItem) {
         this.name = config.name;
         this.type = config.type;
+        this.route = config.route ?? defaultRouteForType(config.type);
         this.channel = config.channel;
-        this.tsmfRelTs = config.tsmfRelTs;
+        this._tsmfRelTs = config.tsmfRelTs;
+        this._configTsmfRelTs = config.tsmfRelTs !== null && config.tsmfRelTs !== undefined;
+        this._tsmfGroupId = common.isValidTsmfGroupId(config.tsmfGroupId) ? config.tsmfGroupId : undefined;
+        this._configTsmfGroupId = this._tsmfGroupId !== undefined;
         this.commandVars = config.commandVars;
         this.#configuredAllowedTuners = this._normalizeAllowedTuners(config.allowedTuners);
-        this.#remoteAllowedTuners = undefined;
         this._updateAllowedTuners();
+    }
+
+    get tsmfRelTs(): number {
+        return this._tsmfRelTs;
+    }
+
+    get tsmfGroupId(): number {
+        return this._tsmfGroupId;
+    }
+
+    get hasConfigTsmfRelTs(): boolean {
+        return this._configTsmfRelTs;
+    }
+
+    get hasConfigTsmfGroupId(): boolean {
+        return this._configTsmfGroupId;
     }
 
     setAllowedTuners(allowedTuners: string[] | undefined): void {
@@ -53,12 +100,319 @@ export default class ChannelItem {
         this._updateAllowedTuners();
     }
 
+    setTsmfRelTs(relTs: number): void {
+        if (this._configTsmfRelTs || relTs === this._tsmfRelTs) {
+            return;
+        }
+        this._tsmfRelTs = relTs;
+    }
+
+    setTsmfGroupId(groupId: number | undefined): void {
+        if (this._streamScanSnapshot) {
+            this._scanGroupIdObserved = true;
+        }
+        const normalized = common.isValidTsmfGroupId(groupId) ? groupId : undefined;
+        if (this._configTsmfGroupId || normalized === this._tsmfGroupId) {
+            return;
+        }
+        this._tsmfGroupId = normalized;
+    }
+
+    beginStreamScan(): void {
+        this._streamScanSnapshot = {
+            streams: this._cloneStreams(this._streams),
+            tsmfRelTs: this._tsmfRelTs,
+            tsmfGroupId: this._tsmfGroupId
+        };
+        this._scanStreamKeys = new Set();
+        this._scanServiceIds = new Map();
+        this._scanGroupIdObserved = false;
+    }
+
+    commitStreamScan(replaceServiceIds: boolean): void {
+        if (!this._streamScanSnapshot) {
+            return;
+        }
+        for (const [key, entry] of this._streams) {
+            if (!this._scanStreamKeys.has(key)) {
+                if (entry.configServiceIds.size === 0) {
+                    this._streams.delete(key);
+                } else {
+                    entry.streamId = 0;
+                    entry.networkId = 0;
+                    entry.serviceIds.clear();
+                }
+                continue;
+            }
+            if (replaceServiceIds) {
+                entry.serviceIds = new Set(this._scanServiceIds.get(key) ?? []);
+            }
+        }
+        if (!this._scanGroupIdObserved && !this._configTsmfGroupId) {
+            this._tsmfGroupId = undefined;
+        }
+        this._finishStreamScan();
+        _.channel?.invalidateStreamIDIndex();
+    }
+
+    rollbackStreamScan(): void {
+        if (!this._streamScanSnapshot) {
+            return;
+        }
+        this._streams = this._streamScanSnapshot.streams;
+        this._tsmfRelTs = this._streamScanSnapshot.tsmfRelTs;
+        this._tsmfGroupId = this._streamScanSnapshot.tsmfGroupId;
+        this._finishStreamScan();
+        _.channel?.invalidateStreamIDIndex();
+    }
+
+    addServiceId(serviceId: number, streamKey: number, fromConfig = false): void {
+        // likely a missing tsmfRelTs in channels.yml
+        if (fromConfig && streamKey === 0) {
+            for (const key of this._streams.keys()) {
+                if (key >= 1) {
+                    return;
+                }
+            }
+        }
+        let entry = this._streams.get(streamKey);
+        if (!entry) {
+            entry = {
+                streamId: 0,
+                networkId: 0,
+                isTlv: false,
+                relTs: streamKey >= 1 ? streamKey : undefined,
+                serviceIds: new Set(),
+                configServiceIds: new Set()
+            };
+            this._streams.set(streamKey, entry);
+        }
+        if (fromConfig) {
+            entry.configServiceIds.add(serviceId);
+            return;
+        }
+        if (this._scanServiceIds) {
+            let serviceIds = this._scanServiceIds.get(streamKey);
+            if (!serviceIds) {
+                serviceIds = new Set();
+                this._scanServiceIds.set(streamKey, serviceIds);
+            }
+            serviceIds.add(serviceId);
+        }
+        if (entry.configServiceIds.has(serviceId) || entry.serviceIds.has(serviceId)) {
+            return;
+        }
+        entry.serviceIds.add(serviceId);
+    }
+
+    getRelTs(serviceId?: number): number | undefined {
+        if (serviceId !== undefined && serviceId !== null) {
+            for (const entry of this._streams.values()) {
+                if (entry.serviceIds.has(serviceId)) {
+                    return entry.relTs;
+                }
+            }
+        }
+        return this.tsmfRelTs;
+    }
+
+    setStream(streamKey: number, streamId: number, networkId: number, isTlv: boolean | undefined, relTs?: number): void {
+        if (streamId === 0xFFFF) {
+            return;
+        }
+        this._scanStreamKeys?.add(streamKey);
+
+        let updated = false;
+        if (streamKey >= 1) {
+            const stale = this._streams.get(0);
+            if (stale && stale.configServiceIds.size === 0) {
+                this._streams.delete(0);
+                updated = true;
+            }
+        } else if (streamKey === 0) {
+            const existing = this._streams.get(0);
+            if (existing && existing.isTlv !== undefined && isTlv !== undefined && existing.isTlv !== isTlv) {
+                this._streams.delete(0);
+                updated = true;
+            }
+        }
+
+        const existing = this._streams.get(streamKey);
+        if (existing) {
+            if (existing.streamId === streamId &&
+                existing.networkId === networkId &&
+                existing.isTlv === isTlv &&
+                existing.relTs === relTs) {
+                if (updated) {
+                    _.channel?.invalidateStreamIDIndex();
+                }
+                return;
+            }
+            if (existing.streamId !== streamId || existing.networkId !== networkId) {
+                existing.serviceIds.clear();
+            }
+            existing.streamId = streamId;
+            existing.networkId = networkId;
+            existing.isTlv = isTlv;
+            existing.relTs = relTs;
+        } else {
+            this._streams.set(streamKey, {
+                streamId, networkId, isTlv, relTs,
+                serviceIds: new Set(),
+                configServiceIds: new Set()
+            });
+        }
+        _.channel?.invalidateStreamIDIndex();
+    }
+
+    setStreamFormat(streamKey: number, isTlv: boolean): void {
+        const entry = this._streams.get(streamKey);
+        if (!entry || entry.isTlv === isTlv) {
+            return;
+        }
+        entry.isTlv = isTlv;
+        _.channel?.invalidateStreamIDIndex();
+        _.channel?.save();
+    }
+
+    getStreams(): ReadonlyMap<number, StreamEntry> {
+        return this._streams;
+    }
+
+    getStreamForService(serviceId: number): StreamEntry | undefined {
+        for (const entry of this._streams.values()) {
+            if (entry.serviceIds.has(serviceId) || entry.configServiceIds.has(serviceId)) {
+                return entry;
+            }
+        }
+        return undefined;
+    }
+
     getServices(): ServiceItem[] {
         return _.service.findByChannel(this);
     }
 
-    getStream(user: common.User, output: stream.Writable): Promise<TSFilter> {
-        return _.tuner.initChannelStream(this, user, output);
+    // the slot-stream check guards against groupId collisions
+    isSameTsmfGroup(other: ChannelItem | null | undefined): boolean {
+        if (!other) {
+            return false;
+        }
+        if (this._tsmfGroupId === null || this._tsmfGroupId === undefined) {
+            return false;
+        }
+        if (other._tsmfGroupId === null || other._tsmfGroupId === undefined) {
+            return false;
+        }
+        if (this._tsmfGroupId !== other._tsmfGroupId) {
+            return false;
+        }
+
+        const entries = [...this._streams].filter(([k]) => k >= 1);
+        const otherEntries = [...other._streams].filter(([k]) => k >= 1);
+        if (entries.length === 0 || otherEntries.length === 0) {
+            return true;
+        }
+        if (entries.length !== otherEntries.length) {
+            return false;
+        }
+        for (const [streamKey, entry] of entries) {
+            const otherEntry = other._streams.get(streamKey);
+            if (!otherEntry ||
+                entry.streamId !== otherEntry.streamId ||
+                entry.networkId !== otherEntry.networkId ||
+                entry.isTlv !== otherEntry.isTlv) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    getStream(user: common.User, output: stream.Writable, tsmfRelTs?: number): Promise<StreamFilter> {
+        return _.tuner.initChannelStream(this, user, output, tsmfRelTs);
+    }
+
+    toJSON(): apid.Channel {
+        return {
+            type: this.type,
+            channel: this.channel,
+            name: this.name,
+            route: this.route,
+            commandVars: this.commandVars,
+            allowedTuners: this.allowedTuners,
+            ...(common.isValidTsmfGroupId(this._tsmfGroupId) && { tsmfGroupId: this._tsmfGroupId }),
+            services: this.getServices().map(service => {
+                const entry = this.resolveStreamForService(service);
+                const svc: apid.Service = {
+                    id: service.id,
+                    serviceId: service.serviceId,
+                    networkId: service.networkId,
+                    streamId: service.streamId,
+                    name: service.name,
+                    type: service.type
+                };
+                if (entry) {
+                    if (entry.streamId !== 0) {
+                        svc.streamId = entry.streamId;
+                    }
+                    if (entry.relTs !== undefined) {
+                        svc.tsmfRelTs = entry.relTs;
+                    }
+                }
+                return svc;
+            })
+        };
+    }
+
+    private resolveStreamForService(service: ServiceItem): StreamEntry | undefined {
+        const localEntry = this.getStreamForService(service.serviceId);
+        if (localEntry) {
+            return localEntry;
+        }
+
+        if (this._tsmfGroupId !== null && this._tsmfGroupId !== undefined) {
+            for (const sibling of _.channel?.items ?? []) {
+                if (sibling === this || sibling.tsmfGroupId !== this._tsmfGroupId) {
+                    continue;
+                }
+                const siblingEntry = sibling.getStreamForService(service.serviceId);
+                if (!siblingEntry || siblingEntry.relTs === undefined) {
+                    continue;
+                }
+                if (siblingEntry.networkId !== 0 &&
+                    (siblingEntry.networkId !== service.networkId || siblingEntry.streamId !== service.streamId)) {
+                    continue;
+                }
+                const groupEntry = this._streams.get(siblingEntry.relTs);
+                if (groupEntry && groupEntry.networkId === service.networkId &&
+                    groupEntry.streamId === service.streamId) {
+                    return groupEntry;
+                }
+            }
+        }
+
+        const candidates = [...this._streams.values()].filter(entry =>
+            entry.networkId === service.networkId && entry.streamId === service.streamId
+        );
+        return candidates.length === 1 ? candidates[0] : undefined;
+    }
+
+    private _finishStreamScan(): void {
+        this._streamScanSnapshot = undefined;
+        this._scanStreamKeys = undefined;
+        this._scanServiceIds = undefined;
+        this._scanGroupIdObserved = false;
+    }
+
+    private _cloneStreams(streams: Map<number, StreamEntry>): Map<number, StreamEntry> {
+        const clone = new Map<number, StreamEntry>();
+        for (const [key, entry] of streams) {
+            clone.set(key, {
+                ...entry,
+                serviceIds: new Set(entry.serviceIds),
+                configServiceIds: new Set(entry.configServiceIds)
+            });
+        }
+        return clone;
     }
 
     private _normalizeAllowedTuners(allowedTuners: string[] | undefined): string[] | undefined {

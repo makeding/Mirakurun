@@ -52,6 +52,7 @@ function setEnv(name: string, value: string) {
 setEnv("SERVER_CONFIG_PATH", "/usr/local/etc/mirakurun/server.yml");
 setEnv("TUNERS_CONFIG_PATH", "/usr/local/etc/mirakurun/tuners.yml");
 setEnv("CHANNELS_CONFIG_PATH", "/usr/local/etc/mirakurun/channels.yml");
+setEnv("CHANNELS_DB_PATH", "/usr/local/var/db/mirakurun/channels.json");
 setEnv("SERVICES_DB_PATH", "/usr/local/var/db/mirakurun/services.json");
 setEnv("PROGRAMS_DB_PATH", "/usr/local/var/db/mirakurun/programs.json");
 setEnv("PROGRAM_HISTORY_DB_PATH", join(dirname(process.env.PROGRAMS_DB_PATH), "programs.sqlite"));
@@ -109,6 +110,7 @@ function sortForIntegrity(value: any): any {
     _.program = new Program({ onStorageFailure: () => { shutdown(1).catch(console.error); } });
     _.server = new Server();
 
+    await _.channel.load();
     await _.service.load();
     await _.program.load();
 

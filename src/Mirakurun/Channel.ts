@@ -18,12 +18,34 @@ import * as log from "./log";
 import * as apid from "../../api";
 import _ from "./_";
 import status from "./status";
-import ChannelItem from "./ChannelItem";
+import ChannelItem, { StreamEntry } from "./ChannelItem";
+import * as db from "./db";
 import { JobItem } from "./Job";
+
+export function streamFormatOf(isTlv: boolean | undefined): apid.StreamFormat | undefined {
+    if (isTlv === undefined) {
+        return undefined;
+    }
+    return isTlv ? "tlv" : "ts";
+}
+
+export interface StreamIDIndexItem {
+    readonly networkId: number;
+    readonly streamId: number;
+    /** `undefined` until the stream has been seen once. */
+    streamFormat?: apid.StreamFormat;
+    readonly channels: Array<{
+        channel: ChannelItem;
+        entry: StreamEntry;
+    }>;
+}
 
 export class Channel {
     private _items: ChannelItem[] = [];
     private _startup: boolean = true;
+    private _saveTimerId: NodeJS.Timeout;
+    private _streamIDIndex = new Map<number, Map<number, StreamIDIndexItem>>();
+    private _streamIDIndexDirty = true;
 
     constructor() {
         this._load();
@@ -56,15 +78,17 @@ export class Channel {
     }
 
     add(item: ChannelItem): void {
-        if (this.get(item.type, item.channel) === null) {
+        if (this.get(item.type, item.channel, item.route) === null) {
             this._items.push(item);
+            this.invalidateStreamIDIndex();
         }
     }
 
-    get(type: apid.ChannelType, channel: string): ChannelItem {
+    get(type: apid.ChannelType, channel: string, route?: apid.ChannelRoute): ChannelItem {
         const l = this._items.length;
         for (let i = 0; i < l; i++) {
-            if (this._items[i].channel === channel && this._items[i].type === type) {
+            if (this._items[i].channel === channel && this._items[i].type === type &&
+                (route === undefined || this._items[i].route === route)) {
                 return this._items[i];
             }
         }
@@ -85,6 +109,169 @@ export class Channel {
         return items;
     }
 
+    findByStreamId(networkId: number, streamId: number): ChannelItem[] {
+        const item = this.getStreamID(networkId, streamId);
+        return item ? item.channels.map(value => value.channel) : [];
+    }
+
+    getStreamIDs(networkId?: number): StreamIDIndexItem[] {
+        this._ensureStreamIDIndex();
+        if (networkId !== undefined) {
+            const streams = this._streamIDIndex.get(networkId);
+            return streams ? [...streams.values()] : [];
+        }
+        const items: StreamIDIndexItem[] = [];
+        for (const streams of this._streamIDIndex.values()) {
+            items.push(...streams.values());
+        }
+        return items;
+    }
+
+    getStreamID(networkId: number, streamId: number): StreamIDIndexItem | undefined {
+        this._ensureStreamIDIndex();
+        return this._streamIDIndex.get(networkId)?.get(streamId);
+    }
+
+    invalidateStreamIDIndex(): void {
+        this._streamIDIndexDirty = true;
+    }
+
+    findByService(networkId: number, serviceId: number): ChannelItem[] {
+        return this._items.filter(channel => {
+            const entry = channel.getStreamForService(serviceId);
+            return entry && entry.networkId === networkId;
+        });
+    }
+
+    save(): void {
+        clearTimeout(this._saveTimerId);
+        this._saveTimerId = setTimeout(() => this._save(), 500);
+    }
+
+    async load(): Promise<void> {
+        log.debug("loading channels db...");
+
+        const records = await db.loadChannels(_.configIntegrity.channels);
+        for (const record of records) {
+            const channel = this.get(record.type, record.channel, record.route);
+            if (!channel) {
+                continue;
+            }
+            if (record.groupId !== undefined && record.groupId !== null) {
+                channel.setTsmfGroupId(record.groupId);
+            }
+            let firstRelTs: number | undefined;
+            if (record.streams) {
+                for (const entry of record.streams) {
+                    let streamKey: number;
+                    let relTs: number | undefined;
+                    if (entry.relTs !== undefined) {
+                        streamKey = entry.relTs;
+                        relTs = entry.relTs;
+                    } else {
+                        streamKey = 0;
+                        relTs = undefined;
+                    }
+                    channel.setStream(streamKey, entry.streamId, entry.networkId, entry.isTlv, relTs);
+                    if (entry.serviceIds) {
+                        for (const sid of entry.serviceIds) {
+                            channel.addServiceId(sid, streamKey);
+                        }
+                    }
+                    if (firstRelTs === undefined && relTs !== undefined) {
+                        firstRelTs = relTs;
+                    }
+                }
+            }
+            if (firstRelTs !== undefined) {
+                channel.setTsmfRelTs(firstRelTs);
+            }
+        }
+        log.info("loaded channels db (%d records)", records.length);
+    }
+
+    private _save(): void {
+        log.debug("saving channels db...");
+
+        const records: db.ChannelRecord[] = [];
+        for (const channel of this._items) {
+            const record: db.ChannelRecord = {
+                type: channel.type,
+                channel: channel.channel,
+                route: channel.route
+            };
+            let hasData = false;
+
+            if (common.isValidTsmfGroupId(channel.tsmfGroupId) && !channel.hasConfigTsmfGroupId) {
+                record.groupId = channel.tsmfGroupId;
+                hasData = true;
+            }
+
+            const streams = channel.getStreams();
+            if (streams.size > 0) {
+                record.streams = [];
+                for (const info of streams.values()) {
+                    const entry: db.ChannelStreamEntry = {
+                        streamId: info.streamId,
+                        networkId: info.networkId
+                    };
+                    if (info.relTs !== undefined) {
+                        entry.relTs = info.relTs;
+                    }
+                    if (info.isTlv !== undefined) {
+                        entry.isTlv = info.isTlv;
+                    }
+                    if (info.serviceIds.size > 0) {
+                        entry.serviceIds = [...info.serviceIds];
+                    }
+                    record.streams.push(entry);
+                }
+                hasData = true;
+            }
+
+            if (hasData) {
+                records.push(record);
+            }
+        }
+        db.saveChannels(records, _.configIntegrity.channels)
+            .catch(e => log.error("channels db save failed: %s", (e as Error).message));
+    }
+
+    private _ensureStreamIDIndex(): void {
+        if (!this._streamIDIndexDirty) {
+            return;
+        }
+
+        const index = new Map<number, Map<number, StreamIDIndexItem>>();
+        for (const channel of this._items) {
+            for (const entry of channel.getStreams().values()) {
+                if (entry.streamId === 0) {
+                    continue;
+                }
+                let streams = index.get(entry.networkId);
+                if (!streams) {
+                    streams = new Map<number, StreamIDIndexItem>();
+                    index.set(entry.networkId, streams);
+                }
+                let item = streams.get(entry.streamId);
+                if (!item) {
+                    item = {
+                        networkId: entry.networkId,
+                        streamId: entry.streamId,
+                        streamFormat: streamFormatOf(entry.isTlv),
+                        channels: []
+                    };
+                    streams.set(entry.streamId, item);
+                }
+                if (!item.channels.some(value => value.channel === channel)) {
+                    item.channels.push({ channel, entry });
+                }
+            }
+        }
+        this._streamIDIndex = index;
+        this._streamIDIndexDirty = false;
+    }
+
     private _load(): void {
         log.debug("loading channels...");
 
@@ -101,6 +288,14 @@ export class Channel {
                 return;
             }
 
+            if (channel.route !== null && channel.route !== undefined && !common.channelRoutes.includes(channel.route)) {
+                log.error("invalid route in channel#%d configuration", i);
+                return;
+            }
+            if (channel.tsmfGroupId !== null && channel.tsmfGroupId !== undefined && !common.isValidTsmfGroupId(channel.tsmfGroupId)) {
+                log.error("invalid tsmfGroupId in channel#%d configuration", i);
+                return;
+            }
             if (typeof channel.channel !== "string") {
                 log.error("invalid type of property `channel` in channel#%d (%s) configuration", i, channel.name);
                 return;
@@ -166,11 +361,13 @@ export class Channel {
                 return;
             }
 
-            if (!this.get(channel.type, channel.channel)) {
-                if (channel.serviceId) {
-                    (<any> channel).name = `${channel.type}:${channel.channel}`;
-                }
-                this.add(new ChannelItem(channel));
+            let item = this.get(channel.type, channel.channel, channel.route ?? common.defaultRouteForType(channel.type));
+            if (!item) {
+                item = new ChannelItem(channel);
+                this.add(item);
+            }
+            if (channel.serviceId !== null && channel.serviceId !== undefined) {
+                item.addServiceId(channel.serviceId, channel.tsmfRelTs ?? 0, true);
             }
         });
     }

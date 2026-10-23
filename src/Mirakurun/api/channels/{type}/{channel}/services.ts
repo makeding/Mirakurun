@@ -20,6 +20,7 @@ import { channelTypes } from "../../../../common";
 import _ from "../../../../_";
 
 export const parameters = [
+    { in: "query", name: "route", type: "string", enum: ["TER", "SAT", "CATV", "HIKARI"] },
     {
         in: "path",
         name: "type",
@@ -36,7 +37,7 @@ export const parameters = [
 ];
 
 export const get: Operation = (req, res) => {
-    const channel = _.channel.get(req.params.type as apid.ChannelType, req.params.channel);
+    const channel = _.channel.get(req.params.type as apid.ChannelType, req.params.channel, req.query.route as apid.ChannelRoute);
 
     if (channel === null) {
         api.responseError(res, 404);

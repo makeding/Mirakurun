@@ -19,7 +19,7 @@ import _ from "./_";
 import * as apid from "../../api";
 import Event from "./Event";
 import ChannelItem from "./ChannelItem";
-import TSFilter from "./TSFilter";
+import StreamFilter from "./StreamFilter";
 
 export default class ServiceItem {
     static getId(networkId: number, serviceId: number): number {
@@ -37,7 +37,8 @@ export default class ServiceItem {
         private _logoId?: number,
         private _remoteControlKeyId?: number,
         private _epgReady: boolean = false,
-        private _epgUpdatedAt: number = 0
+        private _epgUpdatedAt: number = 0,
+        private _streamId?: number
     ) {
         this._id = ServiceItem.getId(_networkId, _serviceId);
     }
@@ -132,6 +133,23 @@ export default class ServiceItem {
         }
     }
 
+    get streamId(): number | undefined {
+        return this._streamId ?? (this._channel.getStreamForService?.(this._serviceId)?.streamId || undefined);
+    }
+
+    set streamId(streamId: number | undefined) {
+        if (streamId !== undefined && this._streamId !== streamId) {
+            this._streamId = streamId;
+            _.service.save();
+            this._updated();
+        }
+    }
+
+    get channels(): ChannelItem[] {
+        const observed = _.channel?.findByService?.(this._networkId, this._serviceId) ?? [];
+        return [...new Set([this._channel, ...observed])];
+    }
+
     get channel(): ChannelItem {
         return this._channel;
     }
@@ -150,6 +168,8 @@ export default class ServiceItem {
             id: this._id,
             serviceId: this._serviceId,
             networkId: this._networkId,
+            streamId: this.streamId,
+            channels: this.channels.map(channel => ({ type: channel.type, channel: channel.channel, route: channel.route })),
             name: this._name || "",
             type: this._type,
             logoId: this._logoId,
@@ -165,7 +185,7 @@ export default class ServiceItem {
         return ret;
     }
 
-    getStream(userRequest: common.UserRequest, output: stream.Writable): Promise<TSFilter> {
+    getStream(userRequest: common.UserRequest, output: stream.Writable): Promise<StreamFilter> {
         return _.tuner.initServiceStream(this, userRequest, output);
     }
 

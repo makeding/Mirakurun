@@ -1,6 +1,5 @@
 const assert = require("node:assert/strict");
 const { test } = require("node:test");
-const { Writable } = require("node:stream");
 
 // status.ts owns a repeating timer in the server.  The parser only needs these
 // counters, and isolating them keeps this focused unit test process finite.
@@ -18,7 +17,6 @@ _.config = { server: {} };
 
 const TLVFilter = require("../lib/Mirakurun/TLVFilter").default;
 const MHEPG = require("../lib/Mirakurun/MHEPG").default;
-const TSFilter = require("../lib/Mirakurun/TSFilter").default;
 
 const networkId = 0x7880;
 const serviceId = 0x1234;
@@ -183,52 +181,6 @@ test("MHEPG atomically records 2160p HEVC metadata and all audio components once
     _.program = undefined;
 });
 
-function output() {
-    const chunks = [];
-    return {
-        chunks,
-        sink: new Writable({ write(chunk, encoding, done) { chunks.push(Buffer.from(chunk)); done(); } })
-    };
-}
-
-test("TSFilter detects a split raw TLV header, preserves bytes, and forwards parse flags", t => {
-    const received = output();
-    const filter = new TSFilter({
-        detectTLV: channel(),
-        passthrough: true,
-        output: received.sink,
-        parseNIT: true,
-        parseSDT: true,
-        parseEIT: true
-    });
-    t.after(() => filter.close());
-    const raw = Buffer.from([0x7f, 0x01, 0x00, 0x01, 0xaa]);
-
-    filter.write(raw.subarray(0, 2));
-    assert.deepEqual(received.chunks, []);
-    filter.write(raw.subarray(2));
-
-    assert.deepEqual(Buffer.concat(received.chunks), raw);
-    assert.ok(filter._tlvFilter);
-    assert.equal(filter._tlvFilter._parseNIT, true);
-    assert.equal(filter._tlvFilter._parseSDT, true);
-    assert.equal(filter._tlvFilter._parseEIT, true);
-});
-
-test("TSFilter keeps converted BS4K transport-stream bytes on the TS path", t => {
-    const received = output();
-    const filter = new TSFilter({ detectTLV: channel(), passthrough: true, output: received.sink });
-    t.after(() => filter.close());
-    const ts = Buffer.alloc(188, 0xff);
-    ts[0] = 0x47;
-    ts[1] = 0x40;
-    ts[3] = 0x10;
-
-    filter.write(ts);
-
-    assert.equal(filter._tlvFilter, undefined);
-    assert.deepEqual(Buffer.concat(received.chunks), ts);
-});
 
 test("MHEPG prepares an event ID again when its broadcast time is reused", () => {
     const id = Number(`${networkId}${serviceId.toString().padStart(5, "0")}00008`);
@@ -244,18 +196,4 @@ test("MHEPG prepares an event ID again when its broadcast time is reused", () =>
     assert.equal(store.calls.set.length, 0);
     epg.end();
     _.program = undefined;
-});
-
-
-test("TSFilter defers stray TS sync bytes until the fragmented TLV header arrives", t => {
-    const received = output();
-    const filter = new TSFilter({ detectTLV: channel(), passthrough: true, output: received.sink });
-    t.after(() => filter.close());
-    const first = Buffer.from([0, 0x47, 0, 0x7f]);
-    const rest = Buffer.from([1, 0, 1, 0xaa]);
-    filter.write(first);
-    assert.equal(filter._inputDetected, false);
-    filter.write(rest);
-    assert.ok(filter._tlvFilter);
-    assert.deepEqual(Buffer.concat(received.chunks), Buffer.concat([first, rest]));
 });

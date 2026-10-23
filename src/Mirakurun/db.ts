@@ -36,12 +36,36 @@ export interface Program extends apid.Program {
     _isFollowing?: true;
 }
 
+export interface ChannelStreamEntry {
+    streamId: number;
+    networkId: number;
+    relTs?: number;
+    isTlv?: boolean;
+    serviceIds?: number[];
+}
+
+export interface ChannelRecord {
+    type: apid.ChannelType;
+    channel: string;
+    route?: apid.ChannelRoute;
+    groupId?: number;
+    streams?: ChannelStreamEntry[];
+}
+
 export async function loadServices(integrity: string, sync = false): Promise<Service[]> {
     return load(process.env.SERVICES_DB_PATH, integrity, sync);
 }
 
 export async function saveServices(data: Service[], integrity: string): Promise<void> {
     return save(process.env.SERVICES_DB_PATH, data, integrity);
+}
+
+export async function loadChannels(integrity: string, sync = false): Promise<ChannelRecord[]> {
+    return load(process.env.CHANNELS_DB_PATH, integrity, sync);
+}
+
+export async function saveChannels(data: ChannelRecord[], integrity: string): Promise<void> {
+    return save(process.env.CHANNELS_DB_PATH, data, integrity);
 }
 
 // use queue because async fs ops is not thread safe

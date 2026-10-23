@@ -161,6 +161,19 @@ describe("[tuner-device.spec] remote stream startup", () => {
         assert.strictEqual(device.users.length, 0);
         assert.strictEqual(device.pid, null);
     });
+
+    it("reuses a remote stream only for its exact decode and container mode", () => {
+        const device = createDevice();
+        const channel = createChannel();
+        device._config.remoteMirakurunDecoder = true;
+        device._channel = channel;
+        device._remoteDecode = true;
+        device._remoteOutputFormat = "tlv";
+
+        assert.strictEqual(device.canReuseStream(channel, false, false, "tlv"), true);
+        assert.strictEqual(device.canReuseStream(channel, true, true, "tlv"), false);
+        assert.strictEqual(device.canReuseStream(channel, false, false, "ts"), false);
+    });
 });
 
 describe("[tuner-device.spec] failed command release", () => {

@@ -71,6 +71,16 @@ export class Service {
         }
     }
 
+    static async getLogoType(networkId: number, logoId: number): Promise<number | null> {
+        const data = await Service.loadLogoData(networkId, logoId);
+        if (!data || data.length < 24 || data.toString("hex", 0, 8) !== "89504e470d0a1a0a") {
+            return null;
+        }
+        const width = data.readUInt32BE(16);
+        const height = data.readUInt32BE(20);
+        return width === 64 && height === 36 ? 0x05 : width === 256 && height === 144 ? 0x07 : null;
+    }
+
     static async saveLogoData(networkId: number, logoId: number, data: Uint8Array, retrying = false): Promise<void> {
         log.info("Service.saveLogoData(): saving... (networkId=%d logoId=%d)", networkId, logoId);
 
@@ -152,7 +162,7 @@ export class Service {
 
         const l = this._items.length;
         for (let i = 0; i < l; i++) {
-            if (this._items[i].channel === channel) {
+            if (this._items[i].channels.includes(channel)) {
                 items.push(this._items[i]);
             }
         }
@@ -198,7 +208,9 @@ export class Service {
 
         const services = await db.loadServices(_.configIntegrity.channels, true);
         for (const service of services) {
-            const channelItem = _.channel.get(service.channel.type, service.channel.channel);
+            const primary = service.channels?.find(channel =>
+                channel.type === service.channel.type && channel.channel === service.channel.channel) ?? service.channel;
+            const channelItem = _.channel.get(primary.type, primary.channel, primary.route);
 
             if (channelItem === null) {
                 updated = true;
@@ -233,7 +245,8 @@ export class Service {
                     service.logoId,
                     service.remoteControlKeyId,
                     service.epgReady,
-                    service.epgUpdatedAt
+                    service.epgUpdatedAt,
+                    service.streamId
                 )
             );
         }
@@ -258,7 +271,7 @@ export class Service {
             if (channelConfig.isDisabled || !channelConfig.serviceId) {
                 continue;
             }
-            const channel = _.channel.get(channelConfig.type, channelConfig.channel);
+            const channel = _.channel.get(channelConfig.type, channelConfig.channel, channelConfig.route);
             if (!channel) {
                 continue;
             }
@@ -392,15 +405,22 @@ export class Service {
                 channel = new ChannelItem({
                     name: service.channel.name || service.name || `${type}:${service.channel.channel}`,
                     type,
-                    channel: service.channel.channel
+                    channel: service.channel.channel,
+                    route: service.channel.route
                 });
                 _.channel.add(channel);
                 channelCount++;
             }
             channel.setRemoteAllowedTuners([...(allowedTunersByChannel.get(channel.channel) || [])]);
 
+            if (service.streamId !== undefined) {
+                const key = service.tsmfRelTs ?? 0;
+                channel.setStream(key, service.streamId, service.networkId, undefined, service.tsmfRelTs);
+                channel.addServiceId(service.serviceId, key);
+            }
             const item = this.get(service.networkId, service.serviceId);
             if (item !== null) {
+                item.streamId = service.streamId;
                 item.name = service.name;
                 item.type = service.type;
                 if (service.logoId > -1) {
@@ -418,7 +438,10 @@ export class Service {
                     service.name,
                     service.type,
                     service.logoId,
-                    service.remoteControlKeyId
+                    service.remoteControlKeyId,
+                    false,
+                    0,
+                    service.streamId
                 )
             );
             serviceCount++;
@@ -497,7 +520,7 @@ export class Service {
         log.debug("ChannelItem#'%s' serviceId=%d: %s", channel.name, serviceId, JSON.stringify(service, null, "  "));
 
         this.add(
-            new ServiceItem(channel, service.networkId, service.serviceId, service.name, service.type, service.logoId)
+            new ServiceItem(channel, service.networkId, service.serviceId, service.name, service.type, service.logoId, service.remoteControlKeyId, false, 0, service.streamId)
         );
 
         log.info("ChannelItem#'%s' serviceId=%d check has finished", channel.name, serviceId);
@@ -523,6 +546,8 @@ export class Service {
                 // GR-ALT before the local channel scan finishes. Prefer the channel
                 // that actually produced the service during a direct scan.
                 item.channel = channel;
+                item.streamId = service.streamId;
+                item.streamId = service.streamId;
                 item.name = service.name;
                 item.type = service.type;
                 if (service.logoId > -1) {
@@ -538,7 +563,10 @@ export class Service {
                         service.name,
                         service.type,
                         service.logoId,
-                        service.remoteControlKeyId
+                        service.remoteControlKeyId,
+                        false,
+                        0,
+                        service.streamId
                     )
                 );
             }

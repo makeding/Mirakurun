@@ -14,3 +14,7 @@ port: 40772
 # programHistoryRetentionDays: <number>
 # Number of days to retain EPG history in SQLite.
 programHistoryRetentionDays: 365
+
+# defaultTlvStreamFormat: <ts|tlv>
+# Native TLV streams remain TLV unless a client explicitly requests MPEG-TS.
+# defaultTlvStreamFormat: tlv

@@ -17,12 +17,15 @@ import rfdc from "rfdc";
 import ChannelItem from "./ChannelItem";
 import * as apid from "../../api";
 
+export type OutputFormat = "ts" | "tlv";
+
 export interface User {
     readonly id: string;
     readonly priority: number;
     readonly agent?: string;
     readonly url?: string;
     readonly disableDecoder?: boolean;
+    readonly outputFormat?: OutputFormat;
     readonly disableMMTSDecoder?: boolean;
     readonly localTunerOnly?: boolean;
     readonly streamSetting?: StreamSetting;
@@ -33,6 +36,11 @@ export type UserRequest = Omit<User, "streamSetting">;
 
 interface StreamSetting {
     channel: ChannelItem;
+    channels?: ChannelItem[];
+    streamId?: number;
+    streamFormat?: apid.StreamFormat;
+    tsmfRelTs?: number;
+    tsmfDiscovery?: boolean;
     networkId?: number;
     serviceId?: number;
     eventId?: number;
@@ -49,6 +57,16 @@ export interface StreamInfo {
 }
 
 export const channelTypes: apid.ChannelType[] = ["GR", "GR-ALT", "BS", "CS", "SKY", "BS4K"];
+
+export const channelRoutes: apid.ChannelRoute[] = ["TER", "SAT", "CATV", "HIKARI"];
+
+export function defaultRouteForType(type: apid.ChannelType): apid.ChannelRoute {
+    return type === "GR" || type === "GR-ALT" ? "TER" : "SAT";
+}
+
+export function isValidTsmfGroupId(groupId: number | null | undefined): boolean {
+    return Number.isInteger(groupId) && groupId >= 1 && groupId <= 255;
+}
 
 export function getTuningChannelType(type: apid.ChannelType): apid.ChannelType {
     return type === "GR-ALT" ? "GR" : type;

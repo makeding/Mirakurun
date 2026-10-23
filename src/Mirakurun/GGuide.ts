@@ -21,7 +21,7 @@ import * as log from "./log";
 import GGuideStore, { GGUIDE_RETENTION_MS } from "./GGuideStore";
 import { createGGuideCapture } from "./GGuideCapture";
 import { enrichGGuideEpg } from "./GGuideEpg";
-import TSFilter from "./TSFilter";
+import StreamFilter from "./StreamFilter";
 
 const JOB_PREFIX = "gguide:";
 
@@ -324,11 +324,11 @@ export default class GGuide {
         if (!this.initialized) { throw new GGuideError(503, this.storageError || "GGuide storage unavailable"); }
     }
 
-    private async collect(request: apid.GGuideCollectionRequest, channel: { getStream: (...args: any[]) => Promise<TSFilter> }, signal: AbortSignal): Promise<void> {
+    private async collect(request: apid.GGuideCollectionRequest, channel: { getStream: (...args: any[]) => Promise<StreamFilter> }, signal: AbortSignal): Promise<void> {
         const startedAt = Date.now();
         const decoded = createGGuideCapture(request, this.decodeBytes, this.preserveModules);
         const { materials, modules, bindings, programIndex, seen, carousel } = decoded;
-        let filter: TSFilter;
+        let filter: StreamFilter;
         let timer: NodeJS.Timeout;
         let idleTimer: NodeJS.Timeout;
         let probeTimer: NodeJS.Timeout;

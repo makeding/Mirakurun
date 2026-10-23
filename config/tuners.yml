@@ -39,3 +39,15 @@
   dvbDevicePath: /dev/dvb/adapter0/dvr0
   decoder: arib-b1-stream-test
   isDisabled: true
+
+# BS4K TLV example. `tlvDecoder` is B61 descrambling only; `tlvToTsDecoder`
+# controls conversion independently, so `?decode=0&format=ts` still remuxes raw TLV.
+# - name: BS4K
+#   types:
+#     - BS4K
+#   routes:
+#     - SAT
+#   command: dvbv5-zap -a 0 -c /app/config/dvbv5_channels.conf <channel> -r -P -
+#   tlvDecoder: arib-b61-stream-test
+#   tlvToTsDecoder: dantto4k - -
+#   isDisabled: true

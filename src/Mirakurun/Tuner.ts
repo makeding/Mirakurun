@@ -13,7 +13,7 @@
    See the License for the specific language governing permissions and
    limitations under the License.
 */
-import { Writable } from "stream";
+import { PassThrough, Writable } from "stream";
 import * as common from "./common";
 import * as log from "./log";
 import * as apid from "../../api";
@@ -21,8 +21,7 @@ import _ from "./_";
 import TunerDevice, { TunerDeviceStatus, TunerStartupError } from "./TunerDevice";
 import ChannelItem from "./ChannelItem";
 import ServiceItem from "./ServiceItem";
-import TSFilter from "./TSFilter";
-import TSDecoder from "./TSDecoder";
+import StreamFilter from "./StreamFilter";
 import { TSHandoffOptions } from "./TSHandoff";
 
 export interface RemoteServiceSource {
@@ -237,7 +236,7 @@ export class Tuner {
         };
     }
 
-    initChannelStream(channel: ChannelItem, userReq: common.UserRequest, output: Writable): Promise<TSFilter> {
+    initChannelStream(channel: ChannelItem, userReq: common.UserRequest, output: Writable, tsmfRelTs?: number): Promise<StreamFilter> {
         let networkId: number;
 
         const services = channel.getServices();
@@ -250,6 +249,7 @@ export class Tuner {
             streamSetting: {
                 channel,
                 networkId,
+                tsmfRelTs,
                 parseEIT: true
             }
         }, output);
@@ -259,11 +259,25 @@ export class Tuner {
         return this._getDevicesByChannel(channel).some(device => device.isRemote === false);
     }
 
-    initServiceStream(service: ServiceItem, userReq: common.UserRequest, output: Writable): Promise<TSFilter> {
+    initStreamIDStream(networkId: number, streamId: number, userReq: common.UserRequest, output: Writable): Promise<StreamFilter> {
+        const item = _.channel.getStreamID(networkId, streamId);
+        if (!item) {
+            return Promise.reject(new Error("stream not found"));
+        }
+        const channels = item.channels.map(value => value.channel);
+        return this._initTS({
+            ...userReq,
+            streamSetting: { channel: channels[0], channels, networkId, streamId,
+                streamFormat: item.streamFormat, parseEIT: true }
+        }, output);
+    }
+
+    initServiceStream(service: ServiceItem, userReq: common.UserRequest, output: Writable, preferredChannel?: ChannelItem): Promise<StreamFilter> {
         return this._initTS({
             ...userReq,
             streamSetting: {
-                channel: service.channel,
+                channel: preferredChannel ?? service.channel,
+                channels: preferredChannel ? [preferredChannel] : service.channels,
                 serviceId: service.serviceId,
                 networkId: service.networkId,
                 parseEIT: true
@@ -271,11 +285,12 @@ export class Tuner {
         }, output);
     }
 
-    initProgramStream(program: apid.Program, userReq: common.UserRequest, output: Writable): Promise<TSFilter> {
+    initProgramStream(program: apid.Program, userReq: common.UserRequest, output: Writable): Promise<StreamFilter> {
         return this._initTS({
             ...userReq,
             streamSetting: {
                 channel: _.service.get(program.networkId, program.serviceId).channel,
+                channels: _.service.get(program.networkId, program.serviceId).channels,
                 serviceId: program.serviceId,
                 eventId: program.eventId,
                 networkId: program.networkId,
@@ -356,6 +371,7 @@ export class Tuner {
         }
 
         // Fallback to stream-based scanning (original logic)
+        channel.beginStreamScan();
         const tsFilter = await this._initTS({
             id: "Mirakurun:getServices()",
             priority: -1,
@@ -366,6 +382,9 @@ export class Tuner {
                 parseSDT: true
             },
             ...user
+        }).catch(error => {
+            channel.rollbackStreamScan();
+            throw error;
         });
         return new Promise<apid.Service[]>((resolve, reject) => {
             let network = {
@@ -398,16 +417,29 @@ export class Tuner {
                 tsFilter.removeAllListeners("services");
 
                 if (network.networkId === -1) {
+                    channel.rollbackStreamScan();
                     reject(new Error("stream has closed before get network"));
                 } else if (services === null) {
+                    channel.rollbackStreamScan();
                     reject(new Error("stream has closed before get services"));
                 } else {
                     if (network.remoteControlKeyId !== -1) {
                         services.forEach(service => {
-                            service.remoteControlKeyId = network.remoteControlKeyId;
+                            if (service.networkId === network.networkId && service.remoteControlKeyId === undefined) {
+                                service.remoteControlKeyId = network.remoteControlKeyId;
+                            }
                         });
                     }
 
+                    for (const service of services) {
+                        const entry = channel.getStreamForService(service.serviceId);
+                        if (entry && entry.networkId === service.networkId && entry.streamId !== 0) {
+                            service.streamId = entry.streamId;
+                            service.tsmfRelTs = entry.relTs;
+                        }
+                    }
+                    channel.commitStreamScan(false);
+                    _.channel.save?.();
                     resolve(services);
                 }
             });
@@ -497,6 +529,17 @@ export class Tuner {
                 return;
             }
 
+            if (tuner.routes !== undefined && (!Array.isArray(tuner.routes) ||
+                tuner.routes.some(route => !common.channelRoutes.includes(route)))) {
+                log.error("invalid routes in tuner#%s configuration", i);
+                return;
+            }
+            for (const field of ["tlvDecoder", "tlvToTsDecoder"] as const) {
+                if (tuner[field] !== undefined && typeof tuner[field] !== "string") {
+                    log.error("invalid %s in tuner#%s configuration", field, i);
+                    return;
+                }
+            }
             if (tuner.isDisabled) {
                 return;
             }
@@ -511,18 +554,17 @@ export class Tuner {
         return this;
     }
 
-    private async _initTS(user: common.User, dest?: Writable): Promise<TSFilter | null> {
+    private async _initTS(user: common.User, dest?: Writable): Promise<StreamFilter | null> {
         const setting = user.streamSetting;
-        if (!dest && setting.channel.type === "BS4K") {
-            user = { ...user, disableMMTSDecoder: true };
-        }
-
+        user = { ...user, disableMMTSDecoder: true };
+        const channels = setting.channels?.length ? setting.channels : [setting.channel];
         if (_.config.server.disableEITParsing === true) {
             setting.parseEIT = false;
         }
 
-        const devices = this._getDevicesByChannel(setting.channel)
-            .filter(device => user.localTunerOnly !== true || device.isRemote === false);
+        const routes = channels.map(channel => ({ channel, devices: this._getDevicesByChannel(channel)
+            .filter(device => user.localTunerOnly !== true || device.isRemote === false) }));
+        const devices = [...new Set(routes.flatMap(route => route.devices))];
         const recoverUnavailableTuners = user.priority >= 0 && devices.length > 0 && devices.every(device => device.isAvailable === false);
         let tryCount = 50;
         let handoffTried = false;
@@ -537,22 +579,23 @@ export class Tuner {
         while (tryCount > 0) {
             const disableDecoder = user.disableDecoder === true;
             const disableMMTSDecoder = user.disableMMTSDecoder === true;
-            const candidateDevices = devices.filter(device => {
-                if (device.canReuseStream(setting.channel, disableDecoder, disableMMTSDecoder) === true) {
-                    return true;
+            let device: TunerDevice = null;
+            // Prefer a local path across all routes before using remote capacity.
+            for (const remote of [false, true]) {
+                for (const route of routes) {
+                    const candidates = route.devices.filter(candidate => candidate.isRemote === remote &&
+                        (candidate.canReuseStream(route.channel, disableDecoder, disableMMTSDecoder, user.outputFormat) ||
+                            (!this._isSourceFailureCoolingDown(candidate) &&
+                                !this._isChannelFailureCoolingDown(candidate, route.channel))));
+                    device = this._pickTunerDevice(candidates, route.channel, user.priority,
+                        disableDecoder, disableMMTSDecoder, recoverUnavailableTuners, user.outputFormat);
+                    if (device) {
+                        setting.channel = route.channel;
+                        break;
+                    }
                 }
-
-                return this._isSourceFailureCoolingDown(device) === false &&
-                    this._isChannelFailureCoolingDown(device, setting.channel) === false;
-            });
-            const device = this._pickTunerDevice(
-                candidateDevices,
-                setting.channel,
-                user.priority,
-                disableDecoder,
-                disableMMTSDecoder,
-                recoverUnavailableTuners
-            );
+                if (device) { break; }
+            }
 
             if (device === null) {
                 if (handoffTried === false && await this._rebalanceForChannel(setting.channel, user.priority)) {
@@ -569,42 +612,67 @@ export class Tuner {
                 await new Promise(resolve => setTimeout(resolve, 250));
             } else {
                 // found
-                let output: Writable;
-                if (user.disableDecoder === true || device.decoder === null || setting.channel.type === "BS4K") {
-                    output = dest;
-                } else {
-                    output = new TSDecoder({
-                        output: dest,
-                        command: device.decoder
-                    });
-                }
-
-                const tsFilter = new TSFilter({
-                    detectTLV: setting.channel.type === "BS4K" ? setting.channel : undefined,
+                const legacyConverter = device.mmtsDecoder;
+                const legacyTlvOutputFormat = legacyConverter &&
+                    !device.config.tlvDecoder && !device.config.tlvToTsDecoder
+                    ? (user.disableDecoder ? "tlv" : "ts") : undefined;
+                const entry = setting.streamId !== undefined
+                    ? [...setting.channel.getStreams().values()].find(value =>
+                        value.networkId === setting.networkId && value.streamId === setting.streamId)
+                    : undefined;
+                // Attach the consumer after startup resolves. This keeps first remote
+                // bytes behind the API's format/MIME negotiation and lets failed
+                // startup attempts close their own sink without ending the consumer.
+                const output = dest ? new PassThrough({ highWaterMark: 1024 * 1024 }) : undefined;
+                const tsFilter = new StreamFilter({
                     output,
+                    decoder: device.decoder,
+                    tlvDecoder: device.config.tlvDecoder,
+                    tlvToTsDecoder: device.config.tlvToTsDecoder || legacyConverter,
+                    disableDecoder,
+                    outputFormat: user.outputFormat,
+                    legacyTlvOutputFormat,
                     networkId: setting.networkId,
                     serviceId: setting.serviceId,
                     eventId: setting.eventId,
-                    passthrough: dest !== undefined && setting.channel.type === "BS4K" && disableMMTSDecoder === true,
                     parseNIT: setting.parseNIT,
                     parseSDT: setting.parseSDT,
                     parseEIT: setting.parseEIT,
-                    tsmfRelTs: setting.channel.tsmfRelTs
+                    tsmfRelTs: setting.tsmfRelTs ?? entry?.relTs ?? setting.channel.getRelTs(setting.serviceId),
+                    tsmfDiscovery: setting.tsmfDiscovery,
+                    channel: setting.channel,
+                    tunerIndex: device.index
                 });
+                const persistStreams = () => _.channel.save?.();
+                tsFilter.on("services", persistStreams);
+                tsFilter.on("networkStreams", persistStreams);
 
                 Object.defineProperty(user, "streamInfo", {
-                    get: () => tsFilter.streamInfo
+                    get: () => tsFilter.streamInfo,
+                    configurable: true
                 });
 
                 const sourceProbe = this._beginSourceProbe(device, setting.channel);
                 try {
                     await device.startStream(user, tsFilter, setting.channel, recoverUnavailableTuners);
+                    if (dest) {
+                        const onClose = () => { output.destroy(); tsFilter.close(); };
+                        dest.once("close", onClose);
+                        setImmediate(() => {
+                            if (!dest.destroyed && !dest.writableEnded) {
+                                output.pipe(dest);
+                            } else {
+                                onClose();
+                            }
+                        });
+                    }
                     this._clearChannelFailure(device, setting.channel);
                     if (sourceProbe === true) {
                         this._validateSourceRecovery(device, setting.channel);
                     }
                     return tsFilter;
                 } catch (err) {
+                    output?.destroy();
                     tsFilter.end();
                     if (err instanceof TunerStartupError) {
                         if (err.failureScope === "source") {
@@ -681,14 +749,15 @@ export class Tuner {
         priority: number,
         disableDecoder = false,
         disableMMTSDecoder = disableDecoder,
-        recoverUnavailableTuners = false
+        recoverUnavailableTuners = false,
+        outputFormat?: apid.StreamFormat
     ): TunerDevice | null {
         const localDevices = devices.filter(device => device.isRemote === false);
         const remoteDevices = devices.filter(device => device.isRemote === true);
 
         // 1. join to existing
         for (const device of [...localDevices, ...remoteDevices]) {
-            if (device.isAvailable === true && device.canReuseStream(channel, disableDecoder, disableMMTSDecoder) === true) {
+            if (device.isAvailable === true && device.canReuseStream(channel, disableDecoder, disableMMTSDecoder, outputFormat) === true) {
                 return device;
             }
         }
@@ -836,7 +905,7 @@ export class Tuner {
     }
 
     private _getHandoffKey(source: TunerDevice, target: TunerDevice, channel: ChannelItem): string {
-        return `${source.index}:${target.index}:${channel.type}:${channel.channel}`;
+        return `${source.index}:${target.index}:${channel.type}:${channel.route}:${channel.channel}`;
     }
 
     private _getHandoffOptions(): TSHandoffOptions {
@@ -851,7 +920,7 @@ export class Tuner {
     }
 
     private _getChannelFailureKey(device: TunerDevice, channel: ChannelItem): string {
-        return `${this._getSourceKey(device)}:${channel.type}:${channel.channel}`;
+        return `${this._getSourceKey(device)}:${channel.type}:${channel.route}:${channel.channel}`;
     }
 
     private _getSourceKey(device: TunerDevice): string {
@@ -861,7 +930,7 @@ export class Tuner {
     }
 
     private _getProbeChannelKey(channel: ChannelItem): string {
-        return `${channel.type}:${channel.channel}`;
+        return `${channel.type}:${channel.route}:${channel.channel}`;
     }
 
     private _isSourceFailureCoolingDown(device: TunerDevice): boolean {
@@ -1038,6 +1107,9 @@ export class Tuner {
         const devices = [];
 
         for (const device of this._getDevicesByType(channel.type)) {
+            if (device.config.routes?.length && !device.config.routes.includes(channel.route)) {
+                continue;
+            }
             // if channel specifies allowedTuners, only return matching tuners
             if (channel.allowedTuners !== undefined) {
                 if (channel.allowedTuners.includes(device.config.name)) {

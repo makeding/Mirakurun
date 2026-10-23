@@ -34,6 +34,8 @@ export type ServiceId = number;
 
 export type NetworkId = number;
 
+export type StreamId = number;
+
 export type ServiceItemId = number;
 
 export type UnixtimeMS = number;
@@ -42,15 +44,37 @@ export interface Channel {
     type: ChannelType;
     channel: string;
     name?: string;
+    route?: ChannelRoute;
+    tsmfRelTs?: number;
+    tsmfGroupId?: number;
+    isMultiCarrier?: boolean;
+    commandVars?: Record<string, string | number>;
+    allowedTuners?: string[];
     services?: Service[];
 }
 
 export type ChannelType = "GR" | "GR-ALT" | "BS" | "CS" | "SKY" | "BS4K";
 
+/** Physical delivery route, used when a tuner supports more than one route. */
+export type ChannelRoute = "TER" | "SAT" | "CATV" | "HIKARI";
+
+/** Container returned by a stream endpoint. */
+export type StreamFormat = "ts" | "tlv";
+
+export interface StreamID {
+    networkId: NetworkId;
+    streamId: StreamId;
+    streamFormat?: StreamFormat;
+    channels: Channel[];
+}
+
 export interface Service {
     id: ServiceItemId;
     serviceId: ServiceId;
     networkId: NetworkId;
+    /** Missing for services discovered before the stream ID was available. */
+    streamId?: StreamId;
+    tsmfRelTs?: number;
     name: string;
     type: number;
     logoId?: number;
@@ -59,6 +83,8 @@ export interface Service {
     epgReady?: boolean;
     epgUpdatedAt?: number;
     channel?: Channel;
+    /** All channel aliases known for this service, including `channel`. */
+    channels?: Channel[];
 }
 
 export interface Program {
@@ -209,6 +235,7 @@ export interface TunerDevice {
     index: number;
     name: string;
     types: ChannelType[];
+    routes?: ChannelRoute[];
     command: string;
     pid: number;
     users: TunerUser[];
@@ -225,6 +252,7 @@ export interface TunerUser {
     agent?: string;
     url?: string;
     disableDecoder?: boolean;
+    outputFormat?: StreamFormat;
     streamSetting?: StreamSetting;
     streamInfo?: StreamInfo;
 }
@@ -232,6 +260,8 @@ export interface TunerUser {
 interface StreamSetting {
     channel: ConfigChannelsItem;
     networkId?: number;
+    streamId?: StreamId;
+    streamFormat?: StreamFormat;
     serviceId?: number;
     eventId?: number;
     noProvide?: boolean;
@@ -329,6 +359,8 @@ export interface ConfigServer {
     allowOrigins: string[];
     allowPNA: boolean;
     tsplayEndpoint: string;
+    /** Default for native TLV inputs when the client omits `format` (defaults to `tlv`). */
+    defaultTlvStreamFormat?: StreamFormat;
 }
 
 /**
@@ -347,6 +379,8 @@ export interface ConfigTunersItem {
     name: string;
     /** channel type. */
     types: ChannelType[];
+    /** Optional physical delivery routes accepted by this tuner. */
+    routes?: ChannelRoute[];
     /** [chardev][dvb] command to get TS. */
     command?: string;
     /** [chardev][dvb] command to get BS4K/MMTS. Falls back to `command` when omitted. */
@@ -369,6 +403,10 @@ export interface ConfigTunersItem {
     decoder?: string;
     /** MMTS processor command for BS4K if needed. */
     mmtsDecoder?: string;
+    /** B61 descrambler for TLV input. It preserves the TLV container. */
+    tlvDecoder?: string;
+    /** Converts TLV input to MPEG-TS (for example, `dantto4k - -`). */
+    tlvToTsDecoder?: string;
     /** `true` to **disable** this tuner. */
     isDisabled?: boolean;
 }
@@ -378,11 +416,15 @@ export type ConfigChannels = ConfigChannelsItem[];
 export interface ConfigChannelsItem {
     name: string;
     type: ChannelType;
+    /** Physical delivery route used to select compatible tuners. */
+    route?: ChannelRoute;
     /** passed to tuning command */
     channel: string;
     serviceId?: number;
     /** TSMF (MPEG-TS Multi Frame) relative TS number config for CATV */
     tsmfRelTs?: number;
+    /** TSMF bonded-carrier group ID, learned or explicitly configured. */
+    tsmfGroupId?: number;
     /**
      * passed to tuning command variables.
      * @example { "freq": 123456, "polarity": "H", "space": 6, "extra-args": "..." }

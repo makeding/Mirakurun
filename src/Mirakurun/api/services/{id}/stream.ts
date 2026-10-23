@@ -44,6 +44,12 @@ export const parameters = [
         type: "integer",
         minimum: 0,
         maximum: 1
+    },
+    {
+        in: "query",
+        name: "format",
+        type: "string",
+        enum: ["ts", "tlv"]
     }
 ];
 
@@ -57,9 +63,11 @@ export const get: Operation = (req, res) => {
 
     const userId = (req.ip || "unix") + ":" + (req.socket.remotePort || Date.now());
 
+    const outputFormat = api.requestedStreamFormat(req.query.format);
+
     // HEAD request support
     if (req.method === "HEAD") {
-        res.setHeader("Content-Type", "video/MP2T");
+        res.setHeader("Content-Type", api.streamContentType(outputFormat));
         res.setHeader("X-Mirakurun-Tuner-User-ID", userId);
         res.status(200).end();
         return;
@@ -68,8 +76,10 @@ export const get: Operation = (req, res) => {
     let requestAborted = false;
     req.once("close", () => requestAborted = true);
 
-    (<any> res.socket)._writableState.highWaterMark = Math.max(res.writableHighWaterMark, 1024 * 1024 * 16);
-    res.socket.setNoDelay(true);
+    if (res.socket) {
+        (<any> res.socket)._writableState.highWaterMark = Math.max(res.writableHighWaterMark, 1024 * 1024 * 16);
+        res.socket.setNoDelay(true);
+    }
 
     service.getStream({
         id: userId,
@@ -78,6 +88,7 @@ export const get: Operation = (req, res) => {
         url: req.url,
         disableDecoder: (<number> <any> req.query.decode === 0),
         disableMMTSDecoder: (<number> <any> req.query.decode === 0),
+        outputFormat,
         localTunerOnly: req.get("X-Mirakurun-Local-Tuner-Only") === "1"
     }, res)
         .then(tsFilter => {
@@ -87,9 +98,7 @@ export const get: Operation = (req, res) => {
 
             req.once("close", () => tsFilter.close());
 
-            res.setHeader("Content-Type", "video/MP2T");
-            res.setHeader("X-Mirakurun-Tuner-User-ID", userId);
-            res.status(200);
+            api.respondStream(res, tsFilter, userId);
         })
         .catch((err) => api.responseStreamErrorHandler(res, err));
 };
@@ -97,7 +106,7 @@ export const get: Operation = (req, res) => {
 get.apiDoc = {
     tags: ["services", "stream"],
     operationId: "getServiceStream",
-    produces: ["video/MP2T"],
+    produces: ["video/MP2T", "application/octet-stream"],
     responses: {
         200: {
             description: "OK",
@@ -109,6 +118,9 @@ get.apiDoc = {
         },
         404: {
             description: "Not Found"
+        },
+        406: {
+            description: "Requested Stream Format Unavailable"
         },
         503: {
             description: "Tuner Resource Unavailable"

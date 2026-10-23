@@ -55,6 +55,10 @@ definitions:
     type: integer
     maximum: 65535
 
+  StreamId:
+    type: integer
+    maximum: 65535
+
   ServiceItemId:
     type: integer
     maximum: 6553565535
@@ -76,8 +80,20 @@ definitions:
         type: string
       name:
         type: string
+      route:
+        $ref: '#/definitions/ChannelRoute'
       tsmfRelTs:
         type: integer
+      tsmfGroupId:
+        type: integer
+      isMultiCarrier:
+        type: boolean
+      commandVars:
+        type: object
+      allowedTuners:
+        type: array
+        items:
+          type: string
       services:
         type: array
         items:
@@ -92,6 +108,31 @@ definitions:
       - CS
       - SKY
       - BS4K
+
+  ChannelRoute:
+    type: string
+    enum: [TER, SAT, CATV, HIKARI]
+
+  StreamFormat:
+    type: string
+    enum: [ts, tlv]
+
+  StreamID:
+    type: object
+    required: [networkId, streamId, channels]
+    properties:
+      networkId:
+        $ref: '#/definitions/NetworkId'
+      streamId:
+        $ref: '#/definitions/StreamId'
+      tsmfRelTs:
+        type: integer
+      streamFormat:
+        $ref: '#/definitions/StreamFormat'
+      channels:
+        type: array
+        items:
+          $ref: '#/definitions/Channel'
 
   # service -------------------------------------------------------------------
 
@@ -110,6 +151,8 @@ definitions:
         $ref: '#/definitions/ServiceId'
       networkId:
         $ref: '#/definitions/NetworkId'
+      streamId:
+        $ref: '#/definitions/StreamId'
       name:
         type: string
       type:
@@ -126,6 +169,10 @@ definitions:
         $ref: '#/definitions/UnixtimeMS'
       channel:
         $ref: '#/definitions/Channel'
+      channels:
+        type: array
+        items:
+          $ref: '#/definitions/Channel'
 
   # program -------------------------------------------------------------------
 
@@ -411,6 +458,10 @@ definitions:
         type: array
         items:
           $ref: '#/definitions/ChannelType'
+      routes:
+        type: array
+        items:
+          $ref: '#/definitions/ChannelRoute'
       command:
         type: string
       pid:
@@ -447,6 +498,8 @@ definitions:
         type: string
       disableDecoder:
         type: boolean
+      outputFormat:
+        $ref: '#/definitions/StreamFormat'
       streamSetting:
         type: object
         required:
@@ -456,6 +509,10 @@ definitions:
             $ref: '#/definitions/ConfigChannelsItem'
           networkId:
             type: integer
+          streamId:
+            $ref: '#/definitions/StreamId'
+          streamFormat:
+            $ref: '#/definitions/StreamFormat'
           serviceId:
             type: integer
           eventId:
@@ -669,6 +726,8 @@ definitions:
         type: integer
       logoDataInterval:
         type: integer
+      defaultTlvStreamFormat:
+        $ref: '#/definitions/StreamFormat'
       tunerHandoff:
         type: object
         properties:
@@ -712,6 +771,10 @@ definitions:
         type: array
         items:
           $ref: '#/definitions/ChannelType'
+      routes:
+        type: array
+        items:
+          $ref: '#/definitions/ChannelRoute'
       command:
         type: string
       commandBS4K:
@@ -734,6 +797,10 @@ definitions:
         type: string
       mmtsDecoder:
         type: string
+      tlvDecoder:
+        type: string
+      tlvToTsDecoder:
+        type: string
       isDisabled:
         type: boolean
 
@@ -753,11 +820,15 @@ definitions:
         type: string
       type:
         $ref: '#/definitions/ChannelType'
+      route:
+        $ref: '#/definitions/ChannelRoute'
       channel:
         type: string
       serviceId:
         $ref: '#/definitions/ServiceId'
       tsmfRelTs:
+        type: integer
+      tsmfGroupId:
         type: integer
       commandVars:
         type: object
