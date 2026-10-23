@@ -15,7 +15,7 @@
 */
 import * as React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Alignment, Button, Card, Dialog, DialogBody, DialogFooter, HTMLSelect, Navbar, NonIdealState, Spinner, Switch, Tag } from "@blueprintjs/core";
+import { Alignment, Button, Card, Dialog, DialogBody, DialogFooter, HTMLSelect, Navbar, NonIdealState, Spinner, Tag } from "@blueprintjs/core";
 import { DateTime } from "luxon";
 import { GGuideAsset, GGuideBinding, GGuideStatus } from "../../../api.d";
 import * as ui from "../modules/ui";
@@ -54,9 +54,6 @@ export const GGuideView: React.FC = () => {
     const [error, setError] = useState<string | null>(null);
     const [bindingsError, setBindingsError] = useState<string | null>(null);
     const [refreshing, setRefreshing] = useState<boolean>(false);
-    const [saving, setSaving] = useState(false);
-    const [settingsError, setSettingsError] = useState<string | null>(null);
-    const [query, setQuery] = useState<string>("");
     const [filter, setFilter] = useState<AssetFilter>("all");
     const [selected, setSelected] = useState<GGuideAsset | null>(null);
     const [brokenImages, setBrokenImages] = useState<Set<string>>(new Set());
@@ -112,27 +109,8 @@ export const GGuideView: React.FC = () => {
     }, [load]);
 
     const filteredAssets = useMemo(() => {
-        const normalizedQuery = query.trim().toLowerCase();
-        return (assets || []).filter(asset => {
-            if (filter === "displayable" && !asset.displayable) { return false; }
-            if (filter === "unsupported" && asset.displayable) { return false; }
-            if (!normalizedQuery) { return true; }
-            return [asset.id, asset.mimeType, asset.width, asset.height, ...asset.sources.flatMap(source => [
-                source.channelType, source.channel, source.serviceId, source.moduleName || "", source.moduleHash, source.recordType.toString(16)
-            ])].join(" ").toLowerCase().includes(normalizedQuery);
-        });
-    }, [assets, filter, query]);
-
-    const toggleCollection = async () => {
-        setSaving(true);
-        setSettingsError(null);
-        try {
-            const response = await fetch("/api/gguide", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled: !status.enabled }) });
-            if (!response.ok) { throw new Error(`設定を保存できませんでした (${response.status})。もう一度切り替えてください。`); }
-            setStatus(await response.json());
-        } catch (err) { setSettingsError(err instanceof Error ? err.message : "設定を保存できませんでした。再試行してください。");
-        } finally { setSaving(false); }
-    };
+        return (assets || []).filter(asset => filter === "all" || (filter === "displayable" ? asset.displayable : !asset.displayable));
+    }, [assets, filter]);
 
     const isInitialLoading = assets === null && error === null;
     const selectedBindings = useMemo(() => selected ? (bindings || []).filter(binding => binding.members.some(member => member.assetId === selected.id)) : [], [bindings, selected]);
@@ -151,14 +129,9 @@ export const GGuideView: React.FC = () => {
             </Navbar>
 
             <div className="content">
-                <Switch label="Hガイド collection" checked={status?.enabled ?? true} disabled={!status || saving} onChange={() => void toggleCollection()} />
-                {settingsError && <div role="alert">{settingsError}</div>}
                 <div className="feedback-slot" aria-live="polite">
                     <div className="material-summary">
-                        <span>保存期間: 最大 7 日</span>
-                        <span>表示可否: 受信時点では未確定</span>
                         {status?.collecting && <Tag intent="primary">収集中</Tag>}
-                        {status && !status.keyConfigured && <Tag intent="warning">復号キー未設定</Tag>}
                         {status && !status.available && status.keyConfigured && <Tag intent="danger">素材ストア利用不可</Tag>}
                         {status?.error && <Tag intent="danger">{status.error}</Tag>}
                     </div>
@@ -178,10 +151,6 @@ export const GGuideView: React.FC = () => {
 
                 {assets !== null && <>
                     <div className="filters" aria-label="素材の絞り込み">
-                        <div className="bp5-input-group">
-                            <span className="bp5-icon bp5-icon-search" />
-                            <input className="bp5-input" type="search" placeholder="チャンネル、モジュール、ハッシュで検索" value={query} onChange={event => setQuery(event.target.value)} />
-                        </div>
                         <HTMLSelect value={filter} onChange={event => setFilter(event.target.value as AssetFilter)}>
                             <option value="all">すべて</option>
                             <option value="displayable">表示可能</option>
@@ -193,7 +162,7 @@ export const GGuideView: React.FC = () => {
                         <NonIdealState
                             icon="media"
                             title={assets.length === 0 ? "保存済み素材はありません" : "条件に合う素材はありません"}
-                            description={assets.length === 0 ? "収集が完了すると、ここに受信した素材が表示されます。" : "検索語またはフィルターを変更してください。"}
+                            description={assets.length === 0 ? "受信した素材がここに表示されます。" : "フィルターを変更してください。"}
                         />
                     ) : (
                         <div className="asset-grid">

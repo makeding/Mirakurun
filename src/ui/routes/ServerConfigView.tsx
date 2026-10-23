@@ -220,6 +220,7 @@ export const ServerConfigView: React.FC = () => {
             {toolbar}
 
             <div className="content">
+                <GGuideSetting />
                 <Section
                     className="config-section"
                     title="Basic Config"
@@ -582,3 +583,42 @@ function isValidCronExpression(cronExpression: string): boolean {
         return false;
     }
 }
+
+const GGuideSetting: React.FC = () => {
+    const [enabled, setEnabled] = useState<boolean | null>(null);
+    const [pending, setPending] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const load = async () => {
+        setPending(true);
+        try {
+            const response = await fetch("/api/gguide");
+            if (!response.ok) { throw new Error(`設定を取得できませんでした (${response.status})`); }
+            setEnabled((await response.json()).enabled);
+            setError(null);
+        } catch (err) { setError(err instanceof Error ? err.message : "設定を取得できませんでした");
+        } finally { setPending(false); }
+    };
+    useEffect(() => { void load(); }, []);
+    const update = async (value: boolean) => {
+        setPending(true);
+        try {
+            const response = await fetch("/api/gguide", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled: value }) });
+            if (!response.ok) { throw new Error(`設定を保存できませんでした (${response.status})`); }
+            setEnabled((await response.json()).enabled);
+            setError(null);
+        } catch (err) { setError(err instanceof Error ? err.message : "設定を保存できませんでした");
+        } finally { setPending(false); }
+    };
+    return <Section className="config-section" title="Hガイド" icon="media" compact>
+        <div className="config-form-grid">
+            <FormGroup className="config-switch-group">
+                <Switch label="Collect materials" checked={enabled ?? false} disabled={enabled === null || pending}
+                    onChange={event => void update(event.currentTarget.checked)} />
+                {pending && <Spinner size={16} />}
+                {error && <div role="alert">{error}。再試行してください。
+                    <Button minimal text="再試行" disabled={pending} onClick={() => void load()} />
+                </div>}
+            </FormGroup>
+        </div>
+    </Section>;
+};
