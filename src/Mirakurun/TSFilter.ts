@@ -261,7 +261,9 @@ export default class TSFilter extends EventEmitter {
             // A BS4K command may supply original TLV or already converted TS.
             // Buffer at most one maximum-sized TLV packet plus its next header.
             for (let i = 0; i + 4 <= buffered.length; i++) {
-                if (buffered[i] === 0x47 && (i + 188 >= buffered.length || buffered[i + 188] === 0x47)) {
+                if (buffered[i] === 0x47 &&
+                    ((i === 0 && buffered.length >= 188 && buffered.length < 376) ||
+                        (i + 188 < buffered.length && buffered[i + 188] === 0x47))) {
                     this._inputDetected = true;
                     break;
                 }

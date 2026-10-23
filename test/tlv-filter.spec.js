@@ -245,3 +245,17 @@ test("MHEPG prepares an event ID again when its broadcast time is reused", () =>
     epg.end();
     _.program = undefined;
 });
+
+
+test("TSFilter defers stray TS sync bytes until the fragmented TLV header arrives", t => {
+    const received = output();
+    const filter = new TSFilter({ detectTLV: channel(), passthrough: true, output: received.sink });
+    t.after(() => filter.close());
+    const first = Buffer.from([0, 0x47, 0, 0x7f]);
+    const rest = Buffer.from([1, 0, 1, 0xaa]);
+    filter.write(first);
+    assert.equal(filter._inputDetected, false);
+    filter.write(rest);
+    assert.ok(filter._tlvFilter);
+    assert.deepEqual(Buffer.concat(received.chunks), Buffer.concat([first, rest]));
+});

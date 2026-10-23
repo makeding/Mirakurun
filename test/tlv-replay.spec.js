@@ -52,7 +52,10 @@ test("BS4K sample -> tuner scan/EPG -> complete current/history HTTP responses",
     _.program = new Program({ memoryOnly: true });
     _.program._history = history;
     t.after(() => _.program.close());
-    t.after(() => _.tuner.get(0).kill());
+    t.after(async () => {
+        const device = _.tuner.get(0);
+        if (device._process && !device._exited) await device.kill();
+    });
 
     const discovered = await _.tuner.getServices(channel);
     assert.equal(discovered.length, 1);
@@ -64,7 +67,7 @@ test("BS4K sample -> tuner scan/EPG -> complete current/history HTTP responses",
         _.service.add(new ServiceItem(channel, service.networkId, service.serviceId, service.name,
             service.type, service.logoId, service.remoteControlKeyId));
     }
-    await _.tuner.getEPG(channel, 5000);
+    await _.tuner.getEPG(channel, 500);
     await history.flush();
     const expected = JSON.parse(await history.programs({ networkId: 11, serviceId: 101 }));
     assert.ok(expected.length > 0);

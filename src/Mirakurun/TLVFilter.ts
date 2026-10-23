@@ -305,7 +305,7 @@ export default class TLVFilter extends EventEmitter {
         if (!this._parseNIT) {
             return;
         }
-        if (nit.tableId !== "TLV-NIT[actual]") {
+        if (nit.tableId !== "TLV-NIT[actual]" || nit.currentNextIndicator === false) {
             return;
         }
 
