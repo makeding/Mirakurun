@@ -542,6 +542,7 @@ export default class TunerDevice extends EventEmitter {
             cmd += " " + (this._config.remoteMirakurunPort || 40772);
             cmd += " " + common.getTuningChannelType(ch.type);
             cmd += " " + ch.channel;
+            cmd += " route=" + ch.route;
             if (this._remoteDecodeFor(disableDecoder)) {
                 cmd += " decode";
             }

@@ -22,7 +22,7 @@ test("BS4K sample -> tuner scan/EPG -> complete current/history HTTP responses",
         exports: { __esModule: true, default: { epg: {}, streamCount: { tsFilter: 0, decoder: 0 },
             errorCount: { tunerDeviceRespawn: 0 } } } };
     const _ = require("../lib/Mirakurun/_").default;
-    const ChannelItem = require("../lib/Mirakurun/ChannelItem").default;
+    const Channel = require("../lib/Mirakurun/Channel").default;
     const Service = require("../lib/Mirakurun/Service").default;
     const ServiceItem = require("../lib/Mirakurun/ServiceItem").default;
     const Tuner = require("../lib/Mirakurun/Tuner").default;
@@ -44,9 +44,11 @@ test("BS4K sample -> tuner scan/EPG -> complete current/history HTTP responses",
     _.service.save = () => {}; // acceptance uses in-memory service ownership
     const logos = new Map();
     Service.saveLogoData = async (networkId, logoId, data) => { logos.set(`${networkId}:${logoId}`, Buffer.from(data)); };
-    const channel = new ChannelItem({ name: "BS4K replay", type: "BS4K", channel: "BS15_0" });
-    _.channel = { items: [channel], get: (type, number) => type === channel.type && number === channel.channel ? channel : null };
+    _.config.channels = [{ name: "BS4K replay", type: "BS4K", channel: "BS15_0" }];
     _.tuner = new Tuner();
+    _.channel = new Channel();
+    _.channel.save = () => {}; // replay owns no files
+    const channel = _.channel.get("BS4K", "BS15_0");
     const history = new ProgramHistory({ path: ":memory:", integrity: "bs4k-replay", retentionDays: 365 });
     await history.open();
     _.program = new Program({ memoryOnly: true });

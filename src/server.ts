@@ -52,8 +52,8 @@ function setEnv(name: string, value: string) {
 setEnv("SERVER_CONFIG_PATH", "/usr/local/etc/mirakurun/server.yml");
 setEnv("TUNERS_CONFIG_PATH", "/usr/local/etc/mirakurun/tuners.yml");
 setEnv("CHANNELS_CONFIG_PATH", "/usr/local/etc/mirakurun/channels.yml");
-setEnv("CHANNELS_DB_PATH", "/usr/local/var/db/mirakurun/channels.json");
 setEnv("SERVICES_DB_PATH", "/usr/local/var/db/mirakurun/services.json");
+setEnv("CHANNELS_DB_PATH", join(dirname(process.env.SERVICES_DB_PATH), "channels.json"));
 setEnv("PROGRAMS_DB_PATH", "/usr/local/var/db/mirakurun/programs.json");
 setEnv("PROGRAM_HISTORY_DB_PATH", join(dirname(process.env.PROGRAMS_DB_PATH), "programs.sqlite"));
 setEnv("LOGO_DATA_DIR_PATH", "/usr/local/var/db/mirakurun/logo-data");
