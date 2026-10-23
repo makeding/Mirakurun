@@ -24,8 +24,11 @@ import _ from "./_";
 import { getProgramItemId } from "./Program";
 import Service from "./Service";
 import ServiceItem from "./ServiceItem";
+import ChannelItem from "./ChannelItem";
+import TLVFilter from "./TLVFilter";
 
 interface TSFilterOptions {
+    readonly detectTLV?: ChannelItem;
     readonly output?: Writable;
     readonly passthrough?: boolean;
 
@@ -88,6 +91,12 @@ interface DownloadData {
 
 export default class TSFilter extends EventEmitter {
     streamInfo: StreamInfo = {};
+
+    private _options: TSFilterOptions;
+    private _inputDetected = false;
+    private _countsStream = true;
+    private _detectBuffer: Buffer = Buffer.alloc(0);
+    private _tlvFilter: TLVFilter;
 
     // output
     private _output: Writable;
@@ -152,6 +161,8 @@ export default class TSFilter extends EventEmitter {
 
     constructor(options: TSFilterOptions) {
         super();
+        this._options = options;
+        this._inputDetected = !options.detectTLV;
 
         const enabletsmf = options.tsmfRelTs || 0;
         this._passthrough = options.passthrough === true;
@@ -243,6 +254,47 @@ export default class TSFilter extends EventEmitter {
     write(chunk: Buffer): void {
         if (this._closed) {
             throw new Error("TSFilter has closed already");
+        }
+
+        if (!this._inputDetected) {
+            const buffered = this._detectBuffer.length > 0 ? Buffer.concat([this._detectBuffer, chunk]) : chunk;
+            // A BS4K command may supply original TLV or already converted TS.
+            // Buffer at most one maximum-sized TLV packet plus its next header.
+            for (let i = 0; i + 4 <= buffered.length; i++) {
+                if (buffered[i] === 0x47 && (i + 188 >= buffered.length || buffered[i + 188] === 0x47)) {
+                    this._inputDetected = true;
+                    break;
+                }
+                if (buffered[i] === 0x7F && [1, 2, 3, 0xFE, 0xFF].includes(buffered[i + 1])) {
+                    this._inputDetected = true;
+                    const options = this._options;
+                    clearTimeout(this._provideEventTimeout);
+                    this._provideEventTimeout = null;
+                    this._tlvFilter = new TLVFilter({ ...options, channelItem: options.detectTLV });
+                    --status.streamCount.tsFilter;
+                    this._countsStream = false;
+                    this.streamInfo = this._tlvFilter.streamInfo;
+                    for (const event of ["network", "networkStreams", "streamInfo", "services", "epgReady"]) {
+                        this._tlvFilter.on(event, (...args: any[]) => this.emit(event, ...args));
+                    }
+                    this._tlvFilter.once("close", () => this._close("tlv:close"));
+                    break;
+                }
+            }
+            if (!this._inputDetected) {
+                if (buffered.length > 65539) {
+                    this._close("unrecognized-bs4k-input");
+                } else {
+                    this._detectBuffer = Buffer.from(buffered);
+                }
+                return;
+            }
+            this._detectBuffer = Buffer.alloc(0);
+            chunk = buffered;
+        }
+        if (this._tlvFilter) {
+            this._tlvFilter.write(chunk);
+            return;
         }
 
         if (this._passthrough === true) {
@@ -1053,6 +1105,10 @@ export default class TSFilter extends EventEmitter {
         }
         this._closeReason = reason;
         this._closed = true;
+        this._tlvFilter?.close();
+        this._tlvFilter = undefined;
+        this._detectBuffer = undefined;
+        this._options = undefined;
 
         // clear timer
         clearTimeout(this._provideEventTimeout);
@@ -1100,7 +1156,9 @@ export default class TSFilter extends EventEmitter {
         // clear streamInfo
         delete this.streamInfo;
 
-        --status.streamCount.tsFilter;
+        if (this._countsStream) {
+            --status.streamCount.tsFilter;
+        }
 
         log.info("TSFilter#_close: closed (serviceId=%s, eventId=%s, reason=%s)", formatNullableId(this._provideServiceId), formatNullableId(this._provideEventId), this._closeReason);
 

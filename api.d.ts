@@ -125,7 +125,12 @@ export interface ProgramVideo {
     resolution: ProgramVideoResolution;
     streamContent: number;
     componentType: number;
+    frameRate?: ProgramVideoFrameRate;
+    transferCharacteristics?: ProgramVideoTransferCharacteristics;
 }
+
+export type ProgramVideoFrameRate = "15" | "23.976" | "24" | "25" | "29.97" | "30" | "50" | "59.94" | "60" | "100" | "119.88" | "120";
+export type ProgramVideoTransferCharacteristics = "bt709" | "iec61966" | "bt2020" | "bt2100-pq" | "bt2100-hlg";
 
 export type ProgramVideoType = "mpeg2" | "h.264" | "h.265";
 

@@ -375,7 +375,7 @@ export class Tuner {
             };
             let services: apid.Service[] = null;
 
-            setTimeout(() => tsFilter.close(), 30000);
+            const timeout = setTimeout(() => tsFilter.close(), 30000);
 
             Promise.all<void>([
                 new Promise((resolve, reject) => {
@@ -393,6 +393,7 @@ export class Tuner {
             ]).then(() => tsFilter.close());
 
             tsFilter.once("close", () => {
+                clearTimeout(timeout);
                 tsFilter.removeAllListeners("network");
                 tsFilter.removeAllListeners("services");
 
@@ -512,6 +513,9 @@ export class Tuner {
 
     private async _initTS(user: common.User, dest?: Writable): Promise<TSFilter | null> {
         const setting = user.streamSetting;
+        if (!dest && setting.channel.type === "BS4K") {
+            user = { ...user, disableMMTSDecoder: true };
+        }
 
         if (_.config.server.disableEITParsing === true) {
             setting.parseEIT = false;
@@ -576,6 +580,7 @@ export class Tuner {
                 }
 
                 const tsFilter = new TSFilter({
+                    detectTLV: setting.channel.type === "BS4K" ? setting.channel : undefined,
                     output,
                     networkId: setting.networkId,
                     serviceId: setting.serviceId,

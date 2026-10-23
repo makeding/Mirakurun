@@ -177,6 +177,12 @@ definitions:
             type: integer
           componentType:
             type: integer
+          frameRate:
+            type: string
+            enum: ['15', '23.976', '24', '25', '29.97', '30', '50', '59.94', '60', '100', '119.88', '120']
+          transferCharacteristics:
+            type: string
+            enum: [bt709, iec61966, bt2020, bt2100-pq, bt2100-hlg]
       audios:
         type: array
         items:
