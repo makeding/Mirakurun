@@ -171,7 +171,8 @@ export default class GGuide {
             session = undefined;
         }
         if (!session) {
-            if (this.isCollecting()) { return; }
+            if (this.active || _.job?.jobs.some(job => job.key.startsWith(JOB_PREFIX) && job.status !== "finished")) { return; }
+            if ([...this.passive.values()].some(item => item.request.channelType === channel.type && item.request.channel === channel.channel)) { return; }
             const target = this.getTargets().find(item => item.channelType === channel.type && item.channel === channel.channel &&
                 (this.passiveCooldown.get(targetKey(item)) || 0) <= Date.now());
             if (!target) { return; }
