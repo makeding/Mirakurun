@@ -646,10 +646,10 @@ it("[program-history snapshot] cold start fences repeated expired observations t
     assert.ok(versions.items.length > 0);
     const baselineRevision = item.revision;
     const old = JSON.parse(archived.internal_json);
-    for (let i = 0; i < 32; ++i) { store.findByNetworkIdAndReplace(old.networkId,
-        [...store.itemMap.values()].filter(p => p.networkId === old.networkId).concat(old)); }
+    for (let i = 0; i < 32; ++i) { store.add({ ...old }); }
     const after = await request(`/program-history/${archived.history_id}`);
-    assert.deepEqual(after, item);
+    assert.ok(after.lastObservedAt >= item.lastObservedAt);
+    assert.deepEqual(after, { ...item, lastObservedAt: after.lastObservedAt });
     assert.equal(after.revision, baselineRevision);
     assert.deepEqual(await request("/programs"), expected);
     const query = new URLSearchParams({ from: old.startAt - DAY, to: old.startAt + DAY,

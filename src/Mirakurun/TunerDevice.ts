@@ -25,6 +25,7 @@ import * as apid from "../../api";
 import status from "./status";
 import Event from "./Event";
 import ChannelItem from "./ChannelItem";
+import _ from "./_";
 import TSFilter from "./TSFilter";
 import Client, { ProgramsQuery } from "../client";
 import { REMOTE_EXIT_CHANNEL_UNAVAILABLE } from "../remoteExitCodes";
@@ -592,6 +593,11 @@ export default class TunerDevice extends EventEmitter {
         if (this._handoffProbe !== null) {
             this._handoffProbe.write(chunk);
         }
+        if ([...this._users].some(user => user.id !== "Mirakurun:GGuide")) {
+            _.gguide?.observe(this._index, this._channel, chunk);
+        } else {
+            _.gguide?.endObservation(this._index);
+        }
     }
 
     private _mmtsDecoderStreamOnData(chunk: Buffer): void {
@@ -768,6 +774,7 @@ export default class TunerDevice extends EventEmitter {
     }
 
     private _end(): void {
+        _.gguide?.endObservation(this._index);
         this._isAvailable = false;
 
         this._stream.removeAllListeners("data");

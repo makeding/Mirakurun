@@ -638,6 +638,24 @@ definitions:
       programHistoryRetentionDays:
         type: integer
         minimum: 1
+      gguideTargets:
+        type: array
+        items:
+          $ref: '#/definitions/GGuideCollectionRequest'
+      gguideSchedule:
+        type: string
+        default: '20 5,11,17,23 * * *'
+        description: Five-field cron in server timezone; empty disables scheduled acquisition.
+      gguidePassive:
+        type: boolean
+        default: true
+      gguidePreserveModules:
+        type: boolean
+        default: false
+      gguideMaxStorageBytes:
+        type: integer
+        minimum: 1048576
+        default: 268435456
       epgGatheringJobSchedule:
         type: string
       epgRetrievalTime:
@@ -895,3 +913,198 @@ definitions:
                 type: number
               max:
                 type: number
+
+  GGuideCollectionRequest:
+    type: object
+    additionalProperties: false
+    required: [channelType, channel, serviceId]
+    properties:
+      channelType:
+        $ref: '#/definitions/ChannelType'
+      channel:
+        type: string
+        minLength: 1
+      serviceId:
+        type: integer
+        minimum: 1
+        maximum: 65535
+      durationSeconds:
+        type: integer
+        minimum: 1
+        maximum: 1800
+        default: 1800
+
+  GGuideSource:
+    type: object
+    required: [channelType, channel, serviceId, pid, downloadId, moduleId, moduleVersion, moduleHash, recordOffset, imageOffset, recordType, metadataHex, firstReceivedAt, lastReceivedAt]
+    properties:
+      channelType:
+        $ref: '#/definitions/ChannelType'
+      channel:
+        type: string
+      serviceId:
+        type: integer
+      pid:
+        type: integer
+      downloadId:
+        type: integer
+      moduleId:
+        type: integer
+      moduleVersion:
+        type: integer
+      moduleHash:
+        type: string
+      moduleName:
+        type: string
+      recordOffset:
+        type: integer
+      imageOffset:
+        type: integer
+      recordType:
+        type: integer
+      metadataHex:
+        type: string
+      firstReceivedAt:
+        type: integer
+      lastReceivedAt:
+        type: integer
+
+  GGuideAsset:
+    type: object
+    required: [id, mimeType, width, height, size, displayable, displayEligibility, firstReceivedAt, lastReceivedAt, sources]
+    properties:
+      id:
+        type: string
+      mimeType:
+        type: string
+        enum: [image/png, image/jpeg]
+      width:
+        type: integer
+      height:
+        type: integer
+      size:
+        type: integer
+      displayable:
+        type: boolean
+      unsupportedReason:
+        type: string
+      displayEligibility:
+        type: string
+        enum: [unknown]
+      firstReceivedAt:
+        type: integer
+      lastReceivedAt:
+        type: integer
+      sources:
+        type: array
+        items:
+          $ref: '#/definitions/GGuideSource'
+
+  GGuideCollectionResult:
+    type: object
+    properties:
+      channelType:
+        $ref: '#/definitions/ChannelType'
+      channel:
+        type: string
+      serviceId:
+        type: integer
+      durationSeconds:
+        type: integer
+      startedAt:
+        type: integer
+      finishedAt:
+        type: integer
+      status:
+        type: string
+        enum: [completed, failed, aborted]
+      assetCount:
+        type: integer
+      moduleCount:
+        type: integer
+      error:
+        type: string
+
+  GGuideStatus:
+    type: object
+    required: [available, keyConfigured, collecting, preserveModules, maxStorageBytes, assetCount]
+    properties:
+      retentionDays:
+        type: integer
+      schedule:
+        type: string
+      targets:
+        type: array
+        items:
+          $ref: '#/definitions/GGuideCollectionRequest'
+      passiveEnabled:
+        type: boolean
+      passiveCollections:
+        type: integer
+      bindingCount:
+        type: integer
+      available:
+        type: boolean
+      keyConfigured:
+        type: boolean
+      collecting:
+        type: boolean
+      preserveModules:
+        type: boolean
+      maxStorageBytes:
+        type: integer
+      assetCount:
+        type: integer
+      lastCollection:
+        $ref: '#/definitions/GGuideCollectionResult'
+      error:
+        type: string
+
+  GGuideBindingMember:
+    type: object
+    required: [role]
+    properties:
+      role:
+        type: string
+        enum: [top, detailImage, detailText, topAnimation, frame, media]
+      assetId:
+        type: string
+      uri:
+        type: string
+      mimeType:
+        type: string
+      imageOffset:
+        type: integer
+      order:
+        type: integer
+  GGuideBinding:
+    type: object
+    required: [id, kind, objectId, channelType, channel, serviceId, members, firstReceivedAt, lastReceivedAt]
+    properties:
+      id:
+        type: string
+      kind:
+        type: string
+        enum: [nap, pap, obj12]
+      objectId:
+        type: integer
+      channelType:
+        type: string
+      channel:
+        type: string
+      serviceId:
+        type: integer
+      members:
+        type: array
+        items:
+          $ref: '#/definitions/GGuideBindingMember'
+      startRaw:
+        type: integer
+      endRaw:
+        type: integer
+      rawControls:
+        type: string
+      firstReceivedAt:
+        type: integer
+      lastReceivedAt:
+        type: integer

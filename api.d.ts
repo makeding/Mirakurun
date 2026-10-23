@@ -302,6 +302,11 @@ export interface ConfigServer {
     eventEndTimeout?: number;
     programGCJobSchedule?: string;
     programHistoryRetentionDays?: number;
+    gguideTargets?: GGuideCollectionRequest[];
+    gguideSchedule?: string;
+    gguidePassive?: boolean;
+    gguidePreserveModules?: boolean;
+    gguideMaxStorageBytes?: number;
     epgGatheringJobSchedule?: string;
     epgRetrievalTime?: number;
     logoDataInterval?: number;
@@ -487,4 +492,94 @@ export interface Status {
             max: number;
         };
     };
+}
+
+/** Extracted broadcast material. Display eligibility is not yet decoded. */
+export interface GGuideSource {
+    channelType: ChannelType;
+    channel: string;
+    serviceId: number;
+    pid: number;
+    downloadId: number;
+    moduleId: number;
+    moduleVersion: number;
+    moduleHash: string;
+    moduleName?: string;
+    recordOffset: number;
+    imageOffset: number;
+    recordType: number;
+    metadataHex: string;
+    firstReceivedAt: number;
+    lastReceivedAt: number;
+}
+
+export interface GGuideAsset {
+    id: string;
+    mimeType: "image/png" | "image/jpeg";
+    width: number;
+    height: number;
+    size: number;
+    displayable: boolean;
+    unsupportedReason?: string;
+    displayEligibility: "unknown";
+    firstReceivedAt: number;
+    lastReceivedAt: number;
+    sources: GGuideSource[];
+}
+
+export interface GGuideBindingMember {
+    role: "top" | "detailImage" | "detailText" | "topAnimation" | "frame" | "media";
+    assetId?: string;
+    uri?: string;
+    mimeType?: string;
+    imageOffset?: number;
+    order?: number;
+}
+
+export interface GGuideBinding {
+    id: string;
+    kind: "nap" | "pap" | "obj12";
+    objectId: number;
+    channelType: ChannelType;
+    channel: string;
+    serviceId: number;
+    members: GGuideBindingMember[];
+    startRaw?: number;
+    endRaw?: number;
+    rawControls?: string;
+    firstReceivedAt: number;
+    lastReceivedAt: number;
+}
+
+export interface GGuideCollectionRequest {
+    channelType: ChannelType;
+    channel: string;
+    serviceId: number;
+    durationSeconds?: number;
+}
+
+export interface GGuideCollectionResult extends GGuideCollectionRequest {
+    startedAt: number;
+    finishedAt: number;
+    status: "completed" | "failed" | "aborted";
+    assetCount: number;
+    moduleCount: number;
+    error?: string;
+}
+
+export interface GGuideStatus {
+    retentionDays: number;
+    schedule?: string;
+    targets: GGuideCollectionRequest[];
+    passiveEnabled: boolean;
+    passiveCollections: number;
+    bindingCount: number;
+    available: boolean;
+    keyConfigured: boolean;
+    collecting: boolean;
+    preserveModules: boolean;
+    maxStorageBytes: number;
+    assetCount: number;
+    lastCollection?: GGuideCollectionResult;
+    error?: string;
 }

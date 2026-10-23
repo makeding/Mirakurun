@@ -39,6 +39,7 @@ import { TunersConfigView } from "./routes/TunersConfigView";
 import { ChannelsConfigView } from "./routes/ChannelsConfigView";
 import { HomeView } from "./routes/HomeView";
 import { AboutView } from "./routes/AboutView";
+import { GGuideView } from "./routes/GGuideView";
 
 import "normalize.css";
 import "@blueprintjs/core/lib/css/blueprint.css";
@@ -83,6 +84,7 @@ const Index: React.FC = () => {
                     <Route path="epg/programs/:programId" element={<ProgramView />} />
                     <Route path="epg/search" element={<SearchView />} />
                     <Route path="jobs" element={<JobsView />} />
+                    <Route path="gguide" element={<GGuideView />} />
                     <Route path="logs" element={<LogsView />} />
                     <Route path="config/server" element={<ServerConfigView />} />
                     <Route path="config/tuners" element={<TunersConfigView />} />

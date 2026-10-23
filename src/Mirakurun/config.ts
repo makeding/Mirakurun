@@ -24,6 +24,7 @@ import Queue from "promise-queue";
 import * as apid from "../../api";
 import * as log from "./log";
 import { isValidCronExpression } from "./Job";
+import { channelTypes } from "./common";
 
 type Writable<T> = { -readonly [K in keyof T]: T[K] };
 
@@ -211,6 +212,27 @@ export async function loadServer(): Promise<Server> {
         config.programHistoryRetentionDays = 365;
     } else if (typeof config.programHistoryRetentionDays !== "number" || !Number.isSafeInteger(config.programHistoryRetentionDays) || config.programHistoryRetentionDays < 1) {
         throw new Error("invalid server config property `programHistoryRetentionDays`: expected a positive safe integer");
+    }
+
+    if (config.gguideSchedule !== undefined && (typeof config.gguideSchedule !== "string" ||
+        (config.gguideSchedule !== "" && !isValidCronExpression(config.gguideSchedule)))) {
+        throw new Error("invalid gguideSchedule: expected five-field cron or empty string");
+    }
+    if (config.gguidePassive !== undefined && typeof config.gguidePassive !== "boolean") {
+        throw new Error("invalid gguidePassive: expected boolean");
+    }
+    if (config.gguideTargets !== undefined && (!Array.isArray(config.gguideTargets) || config.gguideTargets.some(target =>
+        !target || !channelTypes.includes(target.channelType) ||
+        typeof target.channel !== "string" || !target.channel.length ||
+        !Number.isInteger(target.serviceId) || target.serviceId < 1 || target.serviceId > 65535 ||
+        (target.durationSeconds !== undefined && (!Number.isInteger(target.durationSeconds) || target.durationSeconds < 1 || target.durationSeconds > 1800))))) {
+        throw new Error("invalid gguideTargets: expected channelType/channel/serviceId and durationSeconds 1-1800");
+    }
+    if (config.gguidePreserveModules !== undefined && typeof config.gguidePreserveModules !== "boolean") {
+        throw new Error("invalid gguidePreserveModules: expected boolean");
+    }
+    if (config.gguideMaxStorageBytes !== undefined && (!Number.isSafeInteger(config.gguideMaxStorageBytes) || config.gguideMaxStorageBytes < 1024 * 1024)) {
+        throw new Error("invalid gguideMaxStorageBytes: expected integer >= 1048576");
     }
 
     // validate allowIPv4CidrRanges

@@ -66,6 +66,7 @@ import Channel from "./Mirakurun/Channel";
 import Service from "./Mirakurun/Service";
 import Program from "./Mirakurun/Program";
 import Server from "./Mirakurun/Server";
+import GGuide from "./Mirakurun/GGuide";
 import * as config from "./Mirakurun/config";
 import * as log from "./Mirakurun/log";
 
@@ -118,6 +119,8 @@ function sortForIntegrity(value: any): any {
         process.exit(0);
     }
 
+    _.gguide = new GGuide();
+    await _.gguide.init();
     await _.server.init();
 })().catch(err => {
     console.error(err.stack || err);
@@ -129,6 +132,7 @@ function shutdown(code: number): Promise<void> {
     if (!shuttingDown) {
         shuttingDown = (async () => {
             _.job?.close();
+            await _.gguide?.close();
             await Promise.allSettled((_.tuner?.devices || []).map(device => _.tuner.get(device.index).kill()));
             try {
                 await _.server?.deinit();
