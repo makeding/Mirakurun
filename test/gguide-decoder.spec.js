@@ -143,7 +143,7 @@ test("reassembles only GGuide DSM-CC modules announced by the selected service",
         0x11, 3, 0x10, 3, 0, 0, 0, 1, 0, 0, 0, 10, 0, 2, 1, 0, 0, 0, 0x74, 0x65, 0x73, 0x74
     ]));
     carousel.write(Buffer.concat([packet(0, pat), packet(0x100, pmt), packet(0x101, dii), packet(0x101, ddb)]));
-    assert.deepEqual(received, [{ pid: 0x101, downloadId: 1, moduleId: 2, moduleVersion: 1, data: Buffer.from("test") }]);
+    assert.deepEqual(received, [{ serviceId: 1, pid: 0x101, downloadId: 1, moduleId: 2, moduleVersion: 1, data: Buffer.from("test") }]);
     assert.deepEqual(carousel.getStats(), { packets: 4, syncLoss: 0, malformed: 0, completed: 1, discarded: 0, bufferedBytes: 0 });
     carousel.close();
     assert.throws(() => carousel.write(Buffer.alloc(0)), /closed/);

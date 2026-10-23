@@ -70,6 +70,7 @@ export default class TunerDevice extends EventEmitter {
 
     private _users = new Set<User>();
     private _handoffProbe: TSHandoffProbe = null;
+    private _handoffInProgress = false;
 
     private _isAvailable = true;
     private _isRemote = false;
@@ -188,6 +189,9 @@ export default class TunerDevice extends EventEmitter {
     }
 
     canHandoffTo(device: TunerDevice, priority: number): boolean {
+        if (this._handoffInProgress || device._handoffInProgress || device === this) {
+            return false;
+        }
         if (this.isUsing === false || this._channel === null) {
             return false;
         }
@@ -374,6 +378,11 @@ export default class TunerDevice extends EventEmitter {
             return false;
         }
 
+        // Reserve both endpoints synchronously, before the first await.
+        this._handoffInProgress = true;
+        device._handoffInProgress = true;
+        const sourceProcess = this._process;
+        const sourceChannel = this._channel;
         const users = [...this._users];
         const serviceUser = users.find(user => user.streamSetting && user.streamSetting.serviceId !== undefined);
         const handoffOptions: TSHandoffOptions = {
@@ -400,6 +409,7 @@ export default class TunerDevice extends EventEmitter {
 
         try {
             await device.startStream(tempUser, newBuffer as any, this._channel);
+            const targetProcess = device._process;
 
             const switchPCR = await newBuffer.waitForSwitchPCR(() => oldProbe.lastPCR);
             if (switchPCR === null) {
@@ -411,6 +421,14 @@ export default class TunerDevice extends EventEmitter {
                 ));
             }
 
+            // Acquisition and PCR synchronization yield to other requests. Never
+            // commit a snapshot whose source, target or users changed meanwhile.
+            if (this._process !== sourceProcess || this._exited || this._channel !== sourceChannel ||
+                device._channel !== sourceChannel || !targetProcess || device._process !== targetProcess || device._exited ||
+                !device._users.has(tempUser) || this._users.size !== users.length ||
+                users.some(user => !this._users.has(user) || user._stream.closed)) {
+                throw new Error("handoff ownership changed during synchronization");
+            }
             device.detachStream(tempUser);
             const packets = newBuffer.getPacketsFromPCR(switchPCR) || [];
             const bufferedOutput = packets.length > 0 ? Buffer.concat(packets) : null;
@@ -435,6 +453,8 @@ export default class TunerDevice extends EventEmitter {
             }
             return false;
         } finally {
+            this._handoffInProgress = false;
+            device._handoffInProgress = false;
             if (this._handoffProbe === oldProbe) {
                 this._handoffProbe = null;
             }

@@ -528,3 +528,49 @@ describe("[tuner-device.spec] background jobs during streaming", () => {
         });
     });
 });
+
+
+describe("[tuner-device.spec] handoff ownership", () => {
+    for (const cancel of [false, true]) {
+        it(cancel ? "rejects a cancelled source user after PCR wait" : "reserves both endpoints until a single handoff completes", async () => {
+            const { TSHandoffBuffer } = require("../lib/Mirakurun/TSHandoff");
+            const original = TSHandoffBuffer.prototype.waitForSwitchPCR;
+            let release;
+            TSHandoffBuffer.prototype.waitForSwitchPCR = () => new Promise(resolve => { release = resolve; });
+            const source = createDevice();
+            const target = createDevice();
+            const other = createDevice();
+            const channel = createChannel();
+            const user = { id: "recording", priority: 2, _stream: createStream() };
+            source._channel = channel;
+            source._process = {};
+            source._users.add(user);
+            for (const device of [source, target, other]) {
+                device.detachStream = value => device._users.delete(value);
+                device.endStream = value => device._users.delete(value);
+                device._kill = async () => { device._process = null; device._channel = null; };
+            }
+            target.startStream = async (value, stream, selectedChannel) => {
+                target._channel = selectedChannel || target._channel;
+                target._process ||= {};
+                value._stream = stream;
+                target._users.add(value);
+            };
+            try {
+                const pending = source.handoffAllUsersTo(target, 2, {});
+                await Promise.resolve();
+                assert.equal(await source.handoffAllUsersTo(other, 2, {}), false);
+                assert.equal(await target.handoffAllUsersTo(other, 2, {}), false);
+                assert.equal(other.canHandoffTo(target, 2), false);
+                if (cancel) { source._users.delete(user); user._stream.closed = true; }
+                release(1);
+                assert.equal(await pending, !cancel);
+                assert.equal(target._users.has(user), !cancel);
+                assert.equal(source._users.has(user), false);
+                assert.equal(other._users.size, 0);
+                assert.equal(source._handoffInProgress, false);
+                assert.equal(target._handoffInProgress, false);
+            } finally { TSHandoffBuffer.prototype.waitForSwitchPCR = original; }
+        });
+    }
+});

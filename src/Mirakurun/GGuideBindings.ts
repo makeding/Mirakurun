@@ -186,7 +186,9 @@ function parseF8(record: GGuideBindingRecord): GGuideBinding | undefined {
     const objectId = identity.payload.readUInt32BE(0);
     const slot = objectId % 10;
     const text = record.plaintext.toString("latin1");
-    const name = /(?:^|[^A-Za-z0-9_.-])(top1\.jpg|top2\.jpg|detail\.jpg|detail\.gss)(?:\x00|$)/.exec(text)?.[1];
+    // f8 tag 0x0106 prefixes the filename with its byte length; JPEG data
+    // follows it directly, without a NUL terminator.
+    const name = /(?:^|[^A-Za-z0-9_.-])(top1\.jpg|top2\.jpg|detail\.jpg|detail\.gss)(?=[^A-Za-z0-9_.-]|$)/.exec(text)?.[1];
     const role = name === "top1.jpg" && slot === 0 ? "top" :
         name === "top2.jpg" && slot === 1 ? "top" :
             name === "detail.jpg" && slot === 3 ? "detailImage" :
