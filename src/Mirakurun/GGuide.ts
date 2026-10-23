@@ -84,7 +84,7 @@ export default class GGuide {
             this.cleanupTimer.unref();
             if (this.schedule) {
                 _.job.addSchedule({ key: "gguide:scheduled", schedule: this.schedule, job: {
-                    key: "gguide:scheduled", name: "GGuide Gatherer", isRerunnable: false,
+                    key: "gguide:scheduled", name: "HGuide Getherer", isRerunnable: false,
                     retryOnAbort: false, retryOnFail: false,
                     fn: async ({ signal }) => {
                         if (!this.store.enabled) { return; }
@@ -93,11 +93,7 @@ export default class GGuide {
                         for (const [id, session] of this.passive) { this.finishPassive(id, session); }
                         const run = async () => {
                             await Promise.all([...this.pendingSaves]);
-                            for (const target of this.getTargets()) {
-                                const channel = _.channel.get(target.channelType, target.channel);
-                                if (!channel) { throw new Error(`GGuide channel not configured: ${target.channelType}/${target.channel}`); }
-                                await this.collect(target, channel, AbortSignal.any([signal, this.shutdown.signal]));
-                            }
+                            await this.collectTargets(AbortSignal.any([signal, this.shutdown.signal]));
                         };
                         this.active = run();
                         try { await this.active; } finally { this.active = undefined; }
@@ -274,6 +270,40 @@ export default class GGuide {
         }, 2000);
         timer.unref();
         return async () => { clearInterval(timer); await pending; };
+    }
+
+    private async collectTargets(signal: AbortSignal): Promise<void> {
+        const targets = this.getTargets();
+        const running = new Map<Promise<void>, string>();
+        const errors: Error[] = [];
+        const capacity = (type: string) => Math.max(1, _.config.tuners.filter(tuner =>
+            !tuner.isDisabled && tuner.types.includes(type as any)).length);
+        while ((targets.length || running.size) && !signal.aborted) {
+            while (running.size < 2) {
+                // Prefer a different source type so a long local capture does not
+                // postpone the remote region until the entire local scan ends.
+                const eligible = (target: apid.GGuideCollectionRequest) =>
+                    [...running.values()].filter(type => type === target.channelType).length < capacity(target.channelType);
+                let index = targets.findIndex(target => eligible(target) && ![...running.values()].includes(target.channelType));
+                if (index < 0) { index = targets.findIndex(eligible); }
+                if (index < 0) { break; }
+                const [target] = targets.splice(index, 1);
+                const task = Promise.resolve().then(async () => {
+                    signal.throwIfAborted();
+                    const channel = _.channel.get(target.channelType, target.channel);
+                    if (!channel) { throw new Error(`GGuide channel not configured: ${target.channelType}/${target.channel}`); }
+                    await this.collect(target, channel, signal);
+                }).catch(err => {
+                    errors.push(err);
+                    log.warn("HGuide capture %s/%s failed: %s", target.channelType, target.channel, err.message);
+                }).finally(() => running.delete(task));
+                running.set(task, target.channelType);
+            }
+            await Promise.race(running.keys());
+        }
+        await Promise.all(running.keys());
+        signal.throwIfAborted();
+        if (errors.length) { throw errors[0]; }
     }
 
     private getTargets(): apid.GGuideCollectionRequest[] {

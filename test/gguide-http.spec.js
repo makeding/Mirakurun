@@ -188,6 +188,9 @@ process.stdout.on("error",()=>process.exit(0));
         _.job.close();
         _.job = new Job();
         _.config.server.gguideDurationSeconds = 5;
+        await Promise.allSettled(_.tuner.devices.map(device => _.tuner.get(device.index).kill()));
+        _.config.tuners.push({ ..._.config.tuners[0], name: "Second retained TS tuner" });
+        _.tuner = new Tuner();
         await openHistory("automated");
         _.gguide = new GGuide({ ...options });
         await _.gguide.init();
@@ -200,12 +203,15 @@ process.stdout.on("error",()=>process.exit(0));
         }
         const schedules = await json("/job-schedules");
         const schedule = schedules.find(item => item.key === "gguide:scheduled");
-        assert.equal(schedule.job.name, "GGuide Gatherer");
+        assert.equal(schedule.job.name, "HGuide Getherer");
         assert.equal(schedule.schedule, "20 5,11,17,23 * * *");
         const dispatch = await fetch(`${base}/job-schedules/gguide%3Ascheduled/run`, { method: "PUT" });
         assert.equal(dispatch.status, 202, await dispatch.text());
         const scheduledJob = (await json("/jobs")).find(item => item.key === "gguide:scheduled" && item.status !== "finished");
         assert.ok(scheduledJob);
+        await sleep(2500);
+        assert.equal(_.tuner.devices.flatMap(device => device.users).filter(user => user.id === "Mirakurun:GGuide").length, 2,
+            "Schedule execution must acquire two tuner streams concurrently");
         assert.equal((await finished(scheduledJob.id)).hasFailed, false);
         assert.ok((await json("/gguide/assets")).length > 10);
         // Use a fresh store and real viewer-owned tuner; no collector user exists.
@@ -214,7 +220,6 @@ process.stdout.on("error",()=>process.exit(0));
         _.config.server.gguideDurationSeconds = 30;
         await openHistory("passive");
         await Promise.allSettled(_.tuner.devices.map(device => _.tuner.get(device.index).kill()));
-        _.config.tuners.push({ ..._.config.tuners[0], name: "Second retained TS tuner" });
         _.tuner = new Tuner();
         _.gguide = new GGuide({ ...options });
         await _.gguide.init();

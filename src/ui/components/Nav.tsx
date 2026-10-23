@@ -133,7 +133,7 @@ export const Nav: React.FC<NavProps> = ({ pathLv1 }) => {
                         {runningJobs !== 0 && <span className="badge">{runningJobs}</span>}
                     </>
                 } />
-                <Button variant="minimal" {...getNavbarButtonProps("gguide")} icon="media" title="Hガイド 素材" text="Hガイド" />
+                <Button variant="minimal" {...getNavbarButtonProps("gguide")} icon="media" title="Hガイド Collection" text="Hガイド" />
                 <Navbar.Divider />
                 <Button variant="minimal" {...getNavbarButtonProps("logs")} icon="pulse" title="ログ" />
                 <Popover

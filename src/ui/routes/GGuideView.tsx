@@ -45,7 +45,7 @@ function memberDescription(member: GGuideBinding["members"][number], assetIds: S
 
 export const GGuideView: React.FC = () => {
     console.debug("routes", "GGuideView");
-    ui.setTitle("Hガイド 素材");
+    ui.setTitle("Hガイド Collection");
 
     const loading = useRef(false);
     const [assets, setAssets] = useState<GGuideAsset[] | null>(null);
@@ -120,7 +120,7 @@ export const GGuideView: React.FC = () => {
         <div className="route" id="route-gguide-view">
             <Navbar className="toolbar">
                 <Navbar.Group align={Alignment.START}>
-                    <Navbar.Heading>Hガイド 素材</Navbar.Heading>
+                    <Navbar.Heading>Hガイド Collection</Navbar.Heading>
                     {assets !== null && <span className="asset-count">{filteredAssets.length} / {assets.length} 件</span>}
                 </Navbar.Group>
                 <Navbar.Group align={Alignment.END}>
