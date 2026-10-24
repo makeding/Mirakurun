@@ -111,6 +111,8 @@ export class Service {
     }
 
     private _items: ServiceItem[] = [];
+    private _itemsById = new Map<number, ServiceItem>();
+    private _itemsByNetwork = new Map<number, Map<number, ServiceItem>>();
     private _saveTimerId: NodeJS.Timeout;
 
     get items(): ServiceItem[] {
@@ -123,6 +125,10 @@ export class Service {
         }
 
         this._items.push(item);
+        this._itemsById.set(item.id, item);
+        let services = this._itemsByNetwork.get(item.networkId);
+        if (!services) { this._itemsByNetwork.set(item.networkId, services = new Map()); }
+        services.set(item.serviceId, item);
 
         Event.emit("service", "create", item.export());
 
@@ -133,22 +139,9 @@ export class Service {
     get(networkId: number, serviceId: number): ServiceItem;
     get(id: number, serviceId?: number) {
         if (serviceId === undefined) {
-            const l = this._items.length;
-            for (let i = 0; i < l; i++) {
-                if (this._items[i].id === id) {
-                    return this._items[i];
-                }
-            }
-        } else {
-            const l = this._items.length;
-            for (let i = 0; i < l; i++) {
-                if (this._items[i].networkId === id && this._items[i].serviceId === serviceId) {
-                    return this._items[i];
-                }
-            }
+            return this._itemsById.get(id) || null;
         }
-
-        return null;
+        return this._itemsByNetwork.get(id)?.get(serviceId) || null;
     }
 
     exists(id: number): boolean;
@@ -171,29 +164,11 @@ export class Service {
     }
 
     findByNetworkId(networkId: number): ServiceItem[] {
-        const items = [];
-
-        const l = this._items.length;
-        for (let i = 0; i < l; i++) {
-            if (this._items[i].networkId === networkId) {
-                items.push(this._items[i]);
-            }
-        }
-
-        return items;
+        return [...(this._itemsByNetwork.get(networkId)?.values() || [])];
     }
 
     findByNetworkIdWithLogoId(networkId: number, logoId: number): ServiceItem[] {
-        const items = [];
-
-        const l = this._items.length;
-        for (let i = 0; i < l; i++) {
-            if (this._items[i].networkId === networkId && this._items[i].logoId === logoId) {
-                items.push(this._items[i]);
-            }
-        }
-
-        return items;
+        return this.findByNetworkId(networkId).filter(item => item.logoId === logoId);
     }
 
     save(): void {

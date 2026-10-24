@@ -34,6 +34,7 @@ function isExpiredProgram(program: Pick<db.Program, "startAt" | "duration">, now
 
 export class Program {
     private _itemMap = new Map<number, db.Program>();
+    private _networkItems = new Map<number, Set<number>>();
     private _serviceItems = new Map<number, Map<number, Set<number>>>();
     private _itemMapDeleted = new Map<number, db.Program>();
     private _history?: ProgramHistory;
@@ -152,7 +153,7 @@ export class Program {
             (props.serviceId !== undefined && props.serviceId !== item.serviceId));
         if (changesService) { this._unindexItem(item); }
         if (item && common.updateObject(item, props) === true) {
-            if (changesService) { this._indexItem(item); }
+            if (changesService) { this._reindexItem(item); }
             if (props.startAt || props.duration) {
                 this._findAndRemoveConflicts(item);
             }
@@ -210,10 +211,9 @@ export class Program {
     findByNetworkId(networkId: number): db.Program[] {
         const items = [];
 
-        for (const item of this._itemMap.values()) {
-            if (item.networkId === networkId) {
-                items.push(item);
-            }
+        for (const id of this._networkItems.get(networkId) || []) {
+            const item = this._itemMap.get(id);
+            if (item) { items.push(item); }
         }
 
         return items;
@@ -222,10 +222,9 @@ export class Program {
     findByNetworkIdServiceId(networkId: number, serviceId: number): db.Program[] {
         const items = [];
 
-        for (const item of this._itemMap.values()) {
-            if (item.networkId === networkId && item.serviceId === serviceId) {
-                items.push(item);
-            }
+        for (const id of this._serviceItems.get(networkId)?.get(serviceId) || []) {
+            const item = this._itemMap.get(id);
+            if (item) { items.push(item); }
         }
 
         return items;
@@ -234,8 +233,9 @@ export class Program {
     findByNetworkIdAndTime(networkId: number, time: number): db.Program[] {
         const items = [];
 
-        for (const item of this._itemMap.values()) {
-            if (item.networkId === networkId && item.startAt <= time && item.startAt + item.duration > time) {
+        for (const id of this._networkItems.get(networkId) || []) {
+            const item = this._itemMap.get(id);
+            if (item && item.startAt <= time && item.startAt + item.duration > time) {
                 items.push(item);
             }
         }
@@ -246,8 +246,9 @@ export class Program {
     findByNetworkIdAndServiceIdAndTime(networkId: number, serviceId: number, time: number): db.Program[] {
         const items = [];
 
-        for (const item of this._itemMap.values()) {
-            if (item.networkId === networkId && item.serviceId === serviceId && item.startAt <= time && item.startAt + item.duration > time) {
+        for (const id of this._serviceItems.get(networkId)?.get(serviceId) || []) {
+            const item = this._itemMap.get(id);
+            if (item && item.startAt <= time && item.startAt + item.duration > time) {
                 items.push(item);
             }
         }
@@ -260,8 +261,9 @@ export class Program {
         let count = 0;
         const programIds = new Set(programs.map(program => program.id));
 
-        for (const item of [...this._itemMap.values()].reverse()) {
-            if (item.networkId === networkId && programIds.has(item.id) === false) {
+        for (const id of [...(this._networkItems.get(networkId) || [])].reverse()) {
+            const item = this._itemMap.get(id);
+            if (item && programIds.has(item.id) === false) {
                 // Calling `this.remove(item)` here is safe.  Because that never
                 // changes the Array object we're iterating here.
                 this.remove(item.id, false, "remote-replaced");
@@ -287,7 +289,7 @@ export class Program {
                 const changesService = item.networkId !== program.networkId || item.serviceId !== program.serviceId;
                 if (changesService) { this._unindexItem(item); }
                 this._itemMap.set(program.id, program);
-                if (changesService) { this._indexItem(program); }
+                if (changesService) { this._reindexItem(program); }
                 this._emitPrograms.set(program, "update");
                 this._record(program, "active", "remote-update");
                 ++count;
@@ -351,6 +353,10 @@ export class Program {
     }
 
     private _indexItem(item: db.Program): void {
+        let networkIds = this._networkItems.get(item.networkId);
+        if (!networkIds) { this._networkItems.set(item.networkId, networkIds = new Set()); }
+        networkIds.add(item.id);
+
         let services = this._serviceItems.get(item.networkId);
         if (!services) { this._serviceItems.set(item.networkId, services = new Map()); }
         let ids = services.get(item.serviceId);
@@ -359,11 +365,31 @@ export class Program {
     }
 
     private _unindexItem(item: db.Program): void {
+        const networkIds = this._networkItems.get(item.networkId);
+        networkIds?.delete(item.id);
+        if (networkIds?.size === 0) { this._networkItems.delete(item.networkId); }
+
         const services = this._serviceItems.get(item.networkId);
         const ids = services?.get(item.serviceId);
         ids?.delete(item.id);
         if (ids?.size === 0) { services.delete(item.serviceId); }
         if (services?.size === 0) { this._serviceItems.delete(item.networkId); }
+    }
+
+    /** Rebuild destination buckets when an item's identity changes in-place. */
+    private _reindexItem(item: db.Program): void {
+        const networkIds = new Set<number>();
+        const serviceIds = new Set<number>();
+        for (const [id, candidate] of this._itemMap) {
+            if (candidate.networkId === item.networkId) {
+                networkIds.add(id);
+                if (candidate.serviceId === item.serviceId) { serviceIds.add(id); }
+            }
+        }
+        this._networkItems.set(item.networkId, networkIds);
+        let services = this._serviceItems.get(item.networkId);
+        if (!services) { this._serviceItems.set(item.networkId, services = new Map()); }
+        services.set(item.serviceId, serviceIds);
     }
 
     private _findAndRemoveConflicts(added: db.Program): void {

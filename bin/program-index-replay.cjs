@@ -60,9 +60,15 @@ async function main() {
             const updated = structuredClone(batches).map(([nid, batch]) => [nid, batch.filter((_, i) => i % 11 !== 0)
                 .map((p, i) => i % 7 ? p : { ...p, name: p.name + ' 更新', startAt: p.startAt + 60000 })]);
             const changed = measure(() => { for (const [nid, batch] of updated) store.findByNetworkIdAndReplace(nid, batch); });
+            const query = () => [...grouped].map(([nid, batch]) => {
+                const sid = batch[0].serviceId;
+                return [store.findByNetworkId(nid), store.findByNetworkIdServiceId(nid, sid),
+                    store.findByNetworkIdAndTime(nid, now), store.findByNetworkIdAndServiceIdAndTime(nid, sid, now)];
+            });
+            const queries = measure(() => { for (let i = 0; i < 20; i++) query(); });
             states.push(structuredClone({ active: [...store.itemMap], deleted: [...store._itemMapDeleted],
-                events: [...store._emitPrograms] }));
-            results.push({ round, name, cold, unchanged, changed });
+                events: [...store._emitPrograms], queries: query() }));
+            results.push({ round, name, cold, unchanged, changed, queries });
             await store.close();
         }
         assert.deepEqual(states[1], states[0]);
