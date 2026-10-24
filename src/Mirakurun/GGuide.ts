@@ -41,6 +41,8 @@ export default class GGuide {
     private storageError?: string;
     private lastResult?: apid.GGuideCollectionResult;
     private initialized = false;
+    private targetMap = new Map<string, apid.GGuideCollectionRequest>();
+    private targetMapInitialized = false;
     private cleanupTimer?: NodeJS.Timeout;
     private passive = new Map<number, PassiveCapture>();
     private passiveCooldown = new Map<string, { request: apid.GGuideCollectionRequest; until: number }>();
@@ -174,7 +176,8 @@ export default class GGuide {
             const request = { channelType: channel.type, channel: channel.channel };
             if ([...this.passive.values()].some(item => this.sameSource(item.request, request))) { return; }
             if ([...this.passiveCooldown.values()].some(item => item.until > Date.now() && this.sameSource(item.request, request))) { return; }
-            const target = this.getTargets().find(item => this.sameSource(item, request));
+            if (!this.targetMapInitialized) { this.getTargets(); }
+            const target = this.targetMap.get(sourceKey(request));
             if (!target) { return; }
             const received = { ...target, ...request };
             const capture = createGGuideCapture(received, this.decodeBytes, this.preserveModules);
@@ -367,6 +370,7 @@ export default class GGuide {
 
     private getTargets(): apid.GGuideCollectionRequest[] {
         const targets: ChannelItem[] = [];
+        this.targetMap.clear();
         for (const channel of _.channel?.items || []) {
             if (channel.type !== "GR" && channel.type !== "GR-ALT") { continue; }
             const index = targets.findIndex(previous => sameBroadcast(previous, channel));
@@ -375,12 +379,22 @@ export default class GGuide {
                 targets[index] = channel;
             }
         }
-        return targets.map(channel => {
+        const requests = targets.map(channel => {
             const service = _.service?.findByChannel(channel).find(item => /^(?:Gガイド|G-?GUIDE)$/i.test(item.name.normalize("NFKC").trim()));
             return { channelType: channel.type, channel: channel.channel,
                 ...service ? { serviceId: service.serviceId } : {},
                 durationSeconds: _.config.server.gguideDurationSeconds ?? 1800 };
         });
+        for (const channel of _.channel?.items || []) {
+            if (channel.type !== "GR" && channel.type !== "GR-ALT") { continue; }
+            const target = requests.find(item => {
+                const canonical = _.channel.get(item.channelType, item.channel);
+                return !!canonical && sameBroadcast(canonical, channel);
+            });
+            if (target) { this.targetMap.set(sourceKey(channel), target); }
+        }
+        this.targetMapInitialized = true;
+        return requests;
     }
 
     private sameSource(first: apid.GGuideCollectionRequest, second: apid.GGuideCollectionRequest): boolean {
@@ -510,6 +524,10 @@ interface PassiveCapture {
 
 function targetKey(target: apid.GGuideCollectionRequest): string {
     return JSON.stringify([target.channelType, target.channel, target.serviceId]);
+}
+
+function sourceKey(source: { channelType?: apid.ChannelType; type?: apid.ChannelType; channel: string }): string {
+    return `${source.channelType ?? source.type}:${source.channel}`;
 }
 
 function broadcastStreams(channel: ChannelItem): string[] {

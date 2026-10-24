@@ -47,6 +47,20 @@ test("satellite fanout never enumerates terrestrial GGuide targets", t => {
     assert.equal(discoveries, 2, "terrestrial discovery remains available");
 });
 
+test("passive observe caches an unconfigured source until explicit target refresh", t => {
+    const previous = { channel: _.channel, service: _.service };
+    t.after(() => { _.channel = previous.channel; _.service = previous.service; });
+    const value = guide([channel("GR", "13", 32080, 200)]);
+    value.initialized = true;
+    let discoveries = 0;
+    _.service = { findByChannel: () => { discoveries++; return []; } };
+    value.observe(0, { type: "GR", channel: "13" }, Buffer.alloc(0));
+    value.observe(0, { type: "GR", channel: "13" }, Buffer.alloc(0));
+    assert.equal(discoveries, 1);
+    _.service = { findByChannel: () => [{ serviceId: 2199, name: "Ｇガイド" }] };
+    assert.deepEqual(value.getTargets(), [{ channelType: "GR", channel: "13", serviceId: 2199, durationSeconds: 1 }]);
+});
+
 test("targets deduplicate 22/T22 and known alternate routes while preserving regions and distinct known broadcasts", () => {
     const value = guide([
         channel("GR-ALT", "22"),
