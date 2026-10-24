@@ -157,6 +157,13 @@ export default class GGuide {
     /** Observe raw bytes after normal fanout; never owns or extends a tuner stream. */
     observe(tunerId: number, channel: { type: apid.ChannelType; channel: string }, chunk: Buffer): void {
         if (!this.store.enabled || !this.initialized || !this.decodeBytes || !this.passiveEnabled || this.shutdown.signal.aborted || !channel) { return; }
+        // Reception targets are terrestrial only. Satellite EPG streams can
+        // deliver hundreds of chunks per second; never rediscover every
+        // channel/service for each chunk of an ineligible stream.
+        if (channel.type !== "GR" && channel.type !== "GR-ALT") {
+            this.endObservation(tunerId);
+            return;
+        }
         let session = this.passive.get(tunerId);
         if (session && (session.request.channelType !== channel.type || session.request.channel !== channel.channel)) {
             this.endObservation(tunerId);

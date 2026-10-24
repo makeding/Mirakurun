@@ -26,6 +26,27 @@ function guide(channels) {
     return new GGuide();
 }
 
+test("satellite fanout never enumerates terrestrial GGuide targets", t => {
+    const previous = { channel: _.channel, job: _.job, program: _.program, server: _.config.server, tuners: _.config.tuners };
+    t.after(() => {
+        _.channel = previous.channel; _.job = previous.job; _.program = previous.program;
+        _.config.server = previous.server; _.config.tuners = previous.tuners;
+    });
+    const value = guide([]);
+    value.initialized = true;
+    let discoveries = 0;
+    value.getTargets = () => { discoveries++; return []; };
+    const ended = [];
+    value.endObservation = id => ended.push(id);
+    for (const type of ["BS", "CS", "BS4K"]) {
+        for (let i = 0; i < 100; i++) value.observe(2, { type, channel: "test" }, Buffer.alloc(188));
+    }
+    assert.equal(discoveries, 0);
+    assert.equal(ended.length, 300, "finish any terrestrial observation left on the retuned device");
+    for (const type of ["GR", "GR-ALT"]) value.observe(0, { type, channel: "13" }, Buffer.alloc(188));
+    assert.equal(discoveries, 2, "terrestrial discovery remains available");
+});
+
 test("targets deduplicate 22/T22 and known alternate routes while preserving regions and distinct known broadcasts", () => {
     const value = guide([
         channel("GR-ALT", "22"),
