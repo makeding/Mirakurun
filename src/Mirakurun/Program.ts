@@ -34,6 +34,7 @@ function isExpiredProgram(program: Pick<db.Program, "startAt" | "duration">, now
 
 export class Program {
     private _itemMap = new Map<number, db.Program>();
+    private _serviceItems = new Map<number, Map<number, Set<number>>>();
     private _itemMapDeleted = new Map<number, db.Program>();
     private _history?: ProgramHistory;
     private _loaded = false;
@@ -102,6 +103,7 @@ export class Program {
         }
 
         this._itemMap.set(item.id, item);
+        this._indexItem(item);
 
         if (firstAdd === false) {
             this._emitPrograms.set(item, "create");
@@ -123,6 +125,7 @@ export class Program {
         const candidate = item || this._itemMapDeleted.get(id);
         if (candidate && isExpiredProgram({ ...candidate, ...props })) {
             this._record({ ...candidate, ...props }, "archived", "gc");
+            if (item) { this._unindexItem(item); }
             this._itemMap.delete(id);
             this._itemMapDeleted.delete(id);
             this.save();
@@ -133,6 +136,7 @@ export class Program {
             item = this._itemMapDeleted.get(id) || null;
             if (item) {
                 this._itemMap.set(item.id, item);
+                this._indexItem(item);
                 this._itemMapDeleted.delete(item.id);
                 this._emitPrograms.set(item, "create");
                 this._record(item, "active", "overlap-recovered");
@@ -144,7 +148,11 @@ export class Program {
                 );
             }
         }
+        const changesService = item && ((props.networkId !== undefined && props.networkId !== item.networkId) ||
+            (props.serviceId !== undefined && props.serviceId !== item.serviceId));
+        if (changesService) { this._unindexItem(item); }
         if (item && common.updateObject(item, props) === true) {
+            if (changesService) { this._indexItem(item); }
             if (props.startAt || props.duration) {
                 this._findAndRemoveConflicts(item);
             }
@@ -157,6 +165,7 @@ export class Program {
     remove(id: number, logicallyDelete: boolean = false, reason = "removed"): void {
         this._assertWritable();
         const existing = this.get(id);
+        if (existing) { this._unindexItem(existing); }
         if (logicallyDelete) {
             const item = this.get(id);
             if (item) {
@@ -275,7 +284,10 @@ export class Program {
                 this.add(program);
                 ++count;
             } else if (JSON.stringify(item) !== JSON.stringify(program)) {
+                const changesService = item.networkId !== program.networkId || item.serviceId !== program.serviceId;
+                if (changesService) { this._unindexItem(item); }
                 this._itemMap.set(program.id, program);
+                if (changesService) { this._indexItem(program); }
                 this._emitPrograms.set(program, "update");
                 this._record(program, "active", "remote-update");
                 ++count;
@@ -338,10 +350,27 @@ export class Program {
         this._history?.record({ program, status, reason, recoverable, observedAt: Date.now() });
     }
 
+    private _indexItem(item: db.Program): void {
+        let services = this._serviceItems.get(item.networkId);
+        if (!services) { this._serviceItems.set(item.networkId, services = new Map()); }
+        let ids = services.get(item.serviceId);
+        if (!ids) { services.set(item.serviceId, ids = new Set()); }
+        ids.add(item.id);
+    }
+
+    private _unindexItem(item: db.Program): void {
+        const services = this._serviceItems.get(item.networkId);
+        const ids = services?.get(item.serviceId);
+        ids?.delete(item.id);
+        if (ids?.size === 0) { services.delete(item.serviceId); }
+        if (services?.size === 0) { this._serviceItems.delete(item.networkId); }
+    }
+
     private _findAndRemoveConflicts(added: db.Program): void {
         const addedEndAt = added.startAt + added.duration;
 
-        for (const item of this._itemMap.values()) {
+        for (const id of this._serviceItems.get(added.networkId)?.get(added.serviceId) || []) {
+            const item = this._itemMap.get(id);
             if (
                 item.networkId === added.networkId &&
                 item.serviceId === added.serviceId &&
