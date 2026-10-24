@@ -396,10 +396,6 @@ export class Channel {
                 readyFn: async () => {
                     await common.sleep(100);
 
-                    if (status.epg[networkId] === true) {
-                        log.info("Network#%d EPG gathering is already in progress on another stream", networkId);
-                        return false;
-                    }
                     if (service.epgReady === true) {
                         const now = Date.now();
                         if (startup && now - service.epgUpdatedAt < 1000 * 60 * 10) { // 10 mins
@@ -445,6 +441,11 @@ export class Channel {
                 },
                 readyFn: async () => {
                     await common.sleep(100);
+
+                    if (status.epg[networkId] === true) {
+                        log.info("Network#%d EPG gathering is already in progress on another stream", networkId);
+                        return false;
+                    }
 
                     if (service.epgReady === true) {
                         const now = Date.now();
