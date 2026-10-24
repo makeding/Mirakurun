@@ -46,3 +46,34 @@ test("indexed capture writes preserve earlier rows, merge repeated IDs and keep 
     assert.equal(store.bindingCount, 0);
     assert.equal(await store.read(first.asset.id), undefined);
 });
+
+test("reuses resolved associations until a write or the earliest fact, binding or image expiry", async t => {
+    const index = require("../lib/Mirakurun/GGuideProgramIndex");
+    const resolve = index.resolveGGuidePrograms, clock = Date.now;
+    let calls = 0, now = clock();
+    index.resolveGGuidePrograms = (...args) => { calls++; return resolve(...args); };
+    Date.now = () => now;
+    t.after(() => { index.resolveGGuidePrograms = resolve; Date.now = clock; });
+    const state = { assets: [{ id: "image", lastReceivedAt: now - GGUIDE_RETENTION_MS + 1000, sources: [] }],
+        modules: [], moduleReceivedAt: {},
+        bindings: [{ id: "binding", kind: "nap", objectId: 1, lastReceivedAt: now - GGUIDE_RETENTION_MS + 500,
+            members: [{ role: "detailImage", assetId: "image" }, { role: "detailText", text: "detail" }] }],
+        programIndex: [{ scope: "GR/16/2199", value: { kind: "switch", id: "unused" }, receivedAt: now - GGUIDE_RETENTION_MS + 100 }] };
+    const store = new GGuideStore({ gguideOpen: async () => state, gguideSave: async () => state }, 1024);
+    await store.init();
+    const first = store.list();
+    assert.equal(first[0].advertisements[0].text, "detail");
+    first[0].advertisements[0].text = "caller mutation";
+    assert.equal(store.list()[0].advertisements[0].text, "detail");
+    assert.equal(calls, 1);
+    now += 100;
+    store.list(); assert.equal(calls, 2, "expired index fact invalidates the graph");
+    await store.save([], new Map(), undefined);
+    store.list(); assert.equal(calls, 3, "successful publication invalidates the graph");
+    now += 400;
+    assert.deepEqual(store.list()[0].advertisements, []);
+    assert.equal(calls, 4, "expired binding is removed without waiting for cleanup");
+    now += 500;
+    assert.deepEqual(store.list(), []);
+    assert.equal(calls, 5);
+});

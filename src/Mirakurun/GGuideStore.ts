@@ -29,6 +29,7 @@ export const GGUIDE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 /** Persistent GGuide library backed by Mirakurun's existing programs.sqlite worker. */
 export default class GGuideStore {
     private state: GGuideStorageState = { assets: [], modules: [], moduleReceivedAt: {}, bindings: [] };
+    private resolved: { assets: apid.GGuideAsset[]; expiresAt: number } | undefined;
     private ready = false;
     private writer: Promise<void> = Promise.resolve();
 
@@ -56,10 +57,13 @@ export default class GGuideStore {
 
     list(): apid.GGuideAsset[] {
         this.assertReady();
-        const cutoff = Date.now() - GGUIDE_RETENTION_MS;
+        const now = Date.now();
+        if (this.resolved && now < this.resolved.expiresAt) { return structuredClone(this.resolved.assets); }
+        const cutoff = now - GGUIDE_RETENTION_MS;
         const bindings = this.bindings();
+        const facts = (this.state.programIndex || []).filter(fact => fact.receivedAt > cutoff);
         const assets = resolveGGuidePrograms(structuredClone(this.state.assets.filter(asset => asset.lastReceivedAt > cutoff)),
-            bindings, (this.state.programIndex || []).filter(fact => fact.receivedAt > cutoff));
+            bindings, facts);
         for (const asset of assets) {
             asset.advertisements = [];
             for (const binding of bindings) {
@@ -72,7 +76,12 @@ export default class GGuideStore {
                 }
             }
         }
-        return assets;
+        let expiresAt = Infinity;
+        for (const asset of assets) { expiresAt = Math.min(expiresAt, asset.lastReceivedAt + GGUIDE_RETENTION_MS); }
+        for (const binding of bindings) { expiresAt = Math.min(expiresAt, binding.lastReceivedAt + GGUIDE_RETENTION_MS); }
+        for (const fact of facts) { expiresAt = Math.min(expiresAt, fact.receivedAt + GGUIDE_RETENTION_MS); }
+        this.resolved = { assets, expiresAt };
+        return structuredClone(assets);
     }
 
     bindings(): apid.GGuideBinding[] {
@@ -108,7 +117,10 @@ export default class GGuideStore {
         return operation;
     }
 
-    private apply(state: GGuideStorageState): void { this.state = structuredClone(state); }
+    private apply(state: GGuideStorageState): void {
+        this.state = structuredClone(state);
+        this.resolved = undefined;
+    }
     private assertReady(): void { if (!this.ready) { throw new Error("GGuide storage unavailable"); } }
 }
 
