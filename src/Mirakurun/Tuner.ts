@@ -334,7 +334,7 @@ export class Tuner {
             }
         });
 
-        if (tsFilter === null) {
+        if (tsFilter === null || tsFilter.closed) {
             return;
         }
 

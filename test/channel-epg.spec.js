@@ -97,3 +97,10 @@ test("aborting EPG closes its active filter and releases the request", async () 
     await pending;
     assert.equal(closed, 1);
 });
+
+test("EPG completes when its filter closed before startup returned", async () => {
+    const Tuner = require("../lib/Mirakurun/Tuner").default;
+    const tuner = Object.create(Tuner.prototype);
+    tuner._initTS = async () => ({ closed: true });
+    await tuner.getEPG({ getServices: () => [{ networkId: 11 }] }, 100);
+});
