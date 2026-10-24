@@ -135,6 +135,28 @@ describe("[tuner-device.spec] remote stream startup", () => {
         assert.strictEqual(device.users.length, 0);
     });
 
+    it("does not classify preemption before first data as a source failure", async () => {
+        const device = createDevice();
+        const channel = createChannel();
+        const output = createStream();
+        installFakeSpawn(device);
+        const starting = device.startStream({ id: "Mirakurun:GGuide", priority: -1,
+            streamSetting: { channel } }, output, channel);
+        setImmediate(() => {
+            device._closing = true;
+            output.end();
+            device._process.emit("close", 0, null);
+        });
+        await assert.rejects(starting, err => {
+            assert.equal(err instanceof TunerStartupError, false);
+            assert.match(err.message, /cancelled or preempted/);
+            return true;
+        });
+        assert.equal(device.users.length, 0);
+        assert.equal(output.listenerCount("close"), 0);
+        assert.equal(device._process.listenerCount("close"), 0);
+    });
+
     it("ends remote users instead of respawning the same failed tuner", () => {
         const device = createDevice();
         const channel = createChannel();

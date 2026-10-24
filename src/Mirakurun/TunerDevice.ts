@@ -49,6 +49,7 @@ interface StreamSink {
     close(): void;
     end(): void;
     once(event: "close", listener: () => void): unknown;
+    removeListener(event: "close", listener: () => void): unknown;
     syncPriorities?(priority: number): void;
     releaseTsmfCarriers?(): void;
 }
@@ -351,11 +352,12 @@ export default class TunerDevice extends EventEmitter {
         }
 
         if (waitForRemoteStream === true) {
+            const startedProcess = this._process;
             try {
-                await this._waitForRemoteStream();
+                await this._waitForRemoteStream(stream);
             } catch (err) {
                 this._users.delete(user);
-                if (this._process && this._exited === false && this._closing === false) {
+                if (this._process === startedProcess && this._exited === false && this._closing === false) {
                     await this._kill(true).catch(log.error);
                 }
                 this._updated();
@@ -798,7 +800,7 @@ export default class TunerDevice extends EventEmitter {
         }
     }
 
-    private _waitForRemoteStream(): Promise<void> {
+    private _waitForRemoteStream(filter: StreamSink): Promise<void> {
         const tunerProcess = this._process;
         const tunerStream = this._stream;
 
@@ -808,6 +810,11 @@ export default class TunerDevice extends EventEmitter {
                 tunerStream.removeListener("data", onData);
                 tunerProcess.removeListener("close", onClose);
                 tunerProcess.removeListener("error", onError);
+                filter.removeListener("close", onCancelled);
+            };
+            const onCancelled = () => {
+                cleanup();
+                reject(new Error("Remote stream acquisition was cancelled or preempted"));
             };
             const onData = () => {
                 cleanup();
@@ -842,6 +849,8 @@ export default class TunerDevice extends EventEmitter {
             tunerStream.once("data", onData);
             tunerProcess.once("close", onClose);
             tunerProcess.once("error", onError);
+            filter.once("close", onCancelled);
+            if (filter.closed) { onCancelled(); }
         });
     }
 
