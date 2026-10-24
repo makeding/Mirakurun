@@ -152,3 +152,37 @@ test("joins independent OBJ12 records and replaces a refreshed media slot", () =
     assert.deepEqual(mergeMembers(joined, [{ role: "media", order: 0, assetId: "new" }]),
         [{ role: "media", uri: "/OBJ12:42/a", order: 0, assetId: "new" }]);
 });
+
+
+test("decodes only the verified local GSS envelope and merges it with separately received images", async () => {
+    const { mergeMembers, default: GGuideStore } = require("../lib/Mirakurun/GGuideStore");
+    const identity = Buffer.alloc(12);
+    identity.writeUInt32BE(7301372);
+    const makeRecord = content => ({ type: 0xf8, assets: [], plaintext: Buffer.concat([
+        Buffer.from([0, 12, 0xff]), tlv(1, identity), tlv(2, Buffer.alloc(4)), tlv(3, content)
+    ]) });
+    const envelope = Buffer.from("010a0a64657461696c2e67737300", "hex");
+    const textBytes = Buffer.from("93fa967b0d0a687474703a2f2f6578616d706c652e746573742f", "hex");
+    const expected = "日本\r\nhttp://example.test/";
+    const [detail] = parseGGuideBindings([makeRecord(Buffer.concat([envelope, textBytes]))]);
+    assert.equal(detail.members[0].text, expected);
+    for (const content of [Buffer.from("detail.gss\0not the receiver envelope"), Buffer.concat([envelope, Buffer.from([0x81])])]) {
+        const [unsupported] = parseGGuideBindings([makeRecord(content)]);
+        assert.equal(unsupported.members[0].text, undefined);
+    }
+    const members = mergeMembers([{ role: "top", assetId: "banner" }, { role: "detailImage", assetId: "portrait" },
+        { role: "detailText", uri: "http://delivery.example/detail.gss" }], detail.members);
+    // Receiving the URL/index again must not discard already decoded text.
+    const merged = mergeMembers(members, [{ role: "detailText", uri: "http://delivery.example/detail.gss" }]);
+    const now = Date.now();
+    const binding = { ...detail, members: merged, id: "ad", lastReceivedAt: now };
+    const state = { assets: ["banner", "portrait", "unrelated"].map(id => ({ id, sources: [], lastReceivedAt: now })),
+        bindings: [binding, { ...binding, id: "other-region" }], modules: [], moduleReceivedAt: {} };
+    const store = new GGuideStore({ gguideOpen: async () => state }, 1024 * 1024);
+    await store.init();
+    const assets = store.list();
+    assert.deepEqual(assets.map(asset => asset.advertisements), [
+        [{ objectId: 730137, text: expected }], [{ objectId: 730137, text: expected }], []
+    ]);
+    assert.ok(assets.every(asset => !asset.programs?.length), "Advertisement prose is not an EPG identity");
+});

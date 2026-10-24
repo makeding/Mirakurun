@@ -588,6 +588,12 @@ export interface GGuideAsset {
     lastReceivedAt: number;
     sources: GGuideSource[];
     programs?: GGuideProgram[];
+    advertisements?: GGuideAdvertisement[];
+}
+
+export interface GGuideAdvertisement {
+    objectId: number;
+    text: string;
 }
 
 export interface GGuideBindingMember {
@@ -595,6 +601,7 @@ export interface GGuideBindingMember {
     role: "top" | "detailImage" | "detailText" | "topAnimation" | "frame" | "media";
     assetId?: string;
     uri?: string;
+    text?: string;
     mimeType?: string;
     imageOffset?: number;
     order?: number;

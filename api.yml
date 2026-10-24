@@ -1084,6 +1084,22 @@ definitions:
         items:
           $ref: '#/definitions/GGuideProgram'
 
+      advertisements:
+        description: Received advertisement detail text joined by explicit NAP image membership; independent of EPG associations
+        type: array
+        items:
+          $ref: '#/definitions/GGuideAdvertisement'
+
+  GGuideAdvertisement:
+    type: object
+    required: [objectId, text]
+    properties:
+      objectId:
+        type: integer
+      text:
+        description: Plain Shift-JIS-decoded broadcast detail.gss body, not executable content
+        type: string
+
   GGuideProgram:
     type: object
     required: [programGgid, networkId, serviceId]
@@ -1199,6 +1215,9 @@ definitions:
       assetId:
         type: string
       uri:
+        type: string
+      text:
+        description: Plain broadcast detail.gss body, when received and supported
         type: string
       mimeType:
         type: string

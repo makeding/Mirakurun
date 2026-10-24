@@ -127,13 +127,13 @@ export const Nav: React.FC<NavProps> = ({ pathLv1 }) => {
             <Navbar.Group align={Alignment.END}>
                 <Button variant="minimal" {...getNavbarButtonProps("")} icon="home" title="Home" text="Home" />
                 <Button variant="minimal" {...getNavbarButtonProps("epg")} icon="timeline-events" title="EPG" text="EPG" />
+                <Button variant="minimal" {...getNavbarButtonProps("gguide")} icon="media" title="Hガイド Collection" text="Hガイド" />
                 <Button variant="minimal" {...getNavbarButtonProps("jobs")} icon="ninja" title="ジョブ" text={
                     <>
                         ジョブ
                         {runningJobs !== 0 && <span className="badge">{runningJobs}</span>}
                     </>
                 } />
-                <Button variant="minimal" {...getNavbarButtonProps("gguide")} icon="media" title="Hガイド Collection" text="Hガイド" />
                 <Navbar.Divider />
                 <Button variant="minimal" {...getNavbarButtonProps("logs")} icon="pulse" title="ログ" />
                 <Popover

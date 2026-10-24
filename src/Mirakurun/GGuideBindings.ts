@@ -8,6 +8,7 @@
        http://www.apache.org/licenses/LICENSE-2.0
 */
 import { createHash } from "crypto";
+import { TextDecoder } from "util";
 
 export type GGuideBindingKind = "nap" | "pap" | "obj12";
 export type GGuideBindingRole = "top" | "detailImage" | "detailText" | "topAnimation" | "frame" | "media";
@@ -18,6 +19,8 @@ export interface GGuideBindingMember {
     objectId?: number;
     assetId?: string;
     uri?: string;
+    /** Broadcast advertisement detail body, decoded from the local detail.gss member. */
+    text?: string;
     mimeType?: string;
     imageOffset?: number;
     order?: number;
@@ -194,13 +197,24 @@ function parseF8(record: GGuideBindingRecord): GGuideBinding | undefined {
             name === "detail.jpg" && slot === 3 ? "detailImage" :
                 name === "detail.gss" && slot === 2 ? "detailText" : undefined;
     if (!role) { return; }
+    let detailText: string | undefined;
+    if (role === "detailText") {
+        const content = entries.find(item => item.tag === 3)?.payload;
+        const envelope = Buffer.from("010a0a64657461696c2e67737300", "hex");
+        if (content?.subarray(0, envelope.length).equals(envelope)) {
+            try {
+                detailText = new TextDecoder("shift_jis", { fatal: true }).decode(content.subarray(envelope.length));
+            } catch { /* Keep the binding without inventing text for an unsupported payload. */ }
+        }
+    }
     const members: GGuideBindingMember[] = record.assets.map((asset, order) => ({
         role, objectId, assetId: assetId(asset), mimeType: asset.mimeType, imageOffset: asset.imageOffset,
         order: role === "top" ? slot : order
     }));
     // detail.gss is received local material as well but is not an image asset.
     if (members.length === 0) {
-        members.push(role === "top" ? { role, objectId, order: slot } : { role, objectId });
+        members.push(role === "top" ? { role, objectId, order: slot } :
+            { role, objectId, ...(detailText === undefined ? {} : { text: detailText }) });
     }
     return { kind: "nap", objectId: Math.floor(objectId / 10), members, startRaw: identity.payload.readUInt32BE(4),
         endRaw: validity.payload.readUInt32BE(0), rawControls: identity.payload.subarray(8).toString("hex") };

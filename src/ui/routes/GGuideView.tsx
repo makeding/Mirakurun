@@ -166,6 +166,9 @@ export const GGuideView: React.FC = () => {
                             <tr><th>形式</th><td>{selected.mimeType} ({selected.width} × {selected.height}, {selected.size.toLocaleString()} bytes)</td></tr>
                             <tr><th>受信</th><td>{formatDate(selected.firstReceivedAt)} — {formatDate(selected.lastReceivedAt)}</td></tr>
                         </tbody></table>
+                        {selected.advertisements?.map(detail => <div className="asset-advertisement" key={`${detail.objectId}:${detail.text}`}>
+                            {detail.text}
+                        </div>)}
                     </DialogBody>
                     <DialogFooter actions={<Button text="閉じる" onClick={() => setSelected(null)} />} />
                 </>}

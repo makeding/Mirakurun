@@ -45,8 +45,22 @@ export default class GGuideStore {
     list(): apid.GGuideAsset[] {
         this.assertReady();
         const cutoff = Date.now() - GGUIDE_RETENTION_MS;
-        return resolveGGuidePrograms(structuredClone(this.state.assets.filter(asset => asset.lastReceivedAt > cutoff)),
-            this.bindings(), (this.state.programIndex || []).filter(fact => fact.receivedAt > cutoff));
+        const bindings = this.bindings();
+        const assets = resolveGGuidePrograms(structuredClone(this.state.assets.filter(asset => asset.lastReceivedAt > cutoff)),
+            bindings, (this.state.programIndex || []).filter(fact => fact.receivedAt > cutoff));
+        for (const asset of assets) {
+            asset.advertisements = [];
+            for (const binding of bindings) {
+                if (binding.kind !== "nap" || !binding.members.some(member => member.assetId === asset.id)) { continue; }
+                for (const member of binding.members) {
+                    if (member.role !== "detailText" || !member.text) { continue; }
+                    if (!asset.advertisements.some(detail => detail.objectId === binding.objectId && detail.text === member.text)) {
+                        asset.advertisements.push({ objectId: binding.objectId, text: member.text });
+                    }
+                }
+            }
+        }
+        return assets;
     }
 
     bindings(): apid.GGuideBinding[] {
