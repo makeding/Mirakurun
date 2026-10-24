@@ -78,6 +78,7 @@ export class Tuner {
      * readyFn
      */
     async readyForJob(channel: ChannelItem, signal?: AbortSignal): Promise<boolean> {
+        if (signal?.aborted) { return false; }
         const allDevices = this._getDevicesByChannel(channel);
         if (allDevices.length === 0) {
             log.error("readyForJob: no tuners for channel: %s (type=%s, allowedTuners=%s)", channel.name, channel.type, channel.allowedTuners?.join(",") || "any");
@@ -95,6 +96,7 @@ export class Tuner {
         const remoteDevices = allDevices.filter(d => d.isRemote);
 
         while (true) {
+            if (signal?.aborted) { return false; }
             const localPickable = localDevices.filter(device => !this._readyForJobPickedDeviceSet.has(device));
             const remotePickable = remoteDevices.filter(device => !this._readyForJobPickedDeviceSet.has(device));
 
@@ -305,7 +307,8 @@ export class Tuner {
         }, output);
     }
 
-    async getEPG(channel: ChannelItem, time?: number): Promise<void> {
+    async getEPG(channel: ChannelItem, time?: number, signal?: AbortSignal): Promise<void> {
+        if (signal?.aborted) { return; }
         let timeout: NodeJS.Timeout;
         if (!time) {
             time = _.config.server.epgRetrievalTime || 1000 * 60 * 10;
@@ -343,9 +346,12 @@ export class Tuner {
             timeout = setTimeout(fin, time);
             tsFilter.once("epgReady", fin);
             tsFilter.once("close", () => {
-                fin();
+                clearTimeout(timeout);
+                signal?.removeEventListener("abort", fin);
                 resolve();
             });
+            signal?.addEventListener("abort", fin, { once: true });
+            if (signal?.aborted) { fin(); }
         });
     }
 

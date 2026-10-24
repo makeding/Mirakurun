@@ -370,7 +370,7 @@ export class Job {
 
         if (!skip && this._runningJobItemSet.size >= this.maxRunning) {
             log.debug(`Job#_checkReady() running is full [wait]`);
-            while (this._runningJobItemSet.size >= this.maxRunning) {
+            while (!job.ac.signal.aborted && this._runningJobItemSet.size >= this.maxRunning) {
                 await sleep(1000);
             }
         }

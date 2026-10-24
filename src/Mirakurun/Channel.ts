@@ -385,10 +385,10 @@ export class Channel {
                 key: `EPG.Gather.NID.${networkId}`,
                 name: `EPG Gather Network#${networkId}`,
                 isRerunnable: true,
-                fn: async () => {
+                fn: async ({ signal }) => {
                     log.info("Network#%d EPG gathering has started", networkId);
                     try {
-                        await _.tuner.getEPG(service.channel);
+                        await _.tuner.getEPG(service.channel, undefined, signal);
                         log.info("Network#%d EPG gathering has finished", networkId);
                     } catch (e) {
                         log.warn("Network#%d EPG gathering has failed [%s]", networkId, e);
@@ -398,6 +398,10 @@ export class Channel {
                 readyFn: async options => {
                     const signal = options?.signal;
                     await common.sleep(100);
+
+                    if (status.epg[networkId] === true) {
+                        return false;
+                    }
 
                     if (service.epgReady === true) {
                         const now = Date.now();
@@ -429,14 +433,16 @@ export class Channel {
 
         const addBS4KEPGJob = (networkId, service) => {
             let releaseNetwork: (() => void) | undefined;
+            let running = false;
             _.job.add({
                 key: `EPG.Gather.NID.${networkId}.SID.${service.id}`,
                 name: `EPG Gather Network#${networkId} Service#${service.id}`,
                 isRerunnable: true,
-                fn: async () => {
+                fn: async ({ signal }) => {
+                    running = true;
                     log.info("Network#%d Service#%d EPG gathering has started", networkId, service.id);
                     try {
-                        await _.tuner.getEPG(service.channel);
+                        await _.tuner.getEPG(service.channel, undefined, signal);
                         log.info("Network#%d Service#%d EPG gathering has finished", networkId, service.id);
                     } catch (e) {
                         log.warn("Network#%d Service#%d EPG gathering has failed [%s]", networkId, service.id, e);
@@ -444,6 +450,7 @@ export class Channel {
                     } finally {
                         releaseNetwork?.();
                         releaseNetwork = undefined;
+                        running = false;
                     }
                 },
                 readyFn: async options => {
@@ -463,12 +470,15 @@ export class Channel {
 
                     this._epgNetworkBusy.add(networkId);
                     let retainNetwork = false;
+                    let released = false;
                     const release = () => {
-                        if (this._epgNetworkBusy.delete(networkId) && signal) {
-                            signal.removeEventListener("abort", release);
-                        }
+                        if (released) { return; }
+                        released = true;
+                        this._epgNetworkBusy.delete(networkId);
+                        signal?.removeEventListener("abort", onAbort);
                     };
-                    signal?.addEventListener("abort", release, { once: true });
+                    const onAbort = () => { if (!running) { release(); } };
+                    signal?.addEventListener("abort", onAbort, { once: true });
 
                     try {
                         if (status.epg[networkId] === true) {
@@ -500,7 +510,7 @@ export class Channel {
                         }
 
                         const ready = await _.tuner.readyForJob(service.channel, signal);
-                        if (!ready) {
+                        if (!ready || signal?.aborted) {
                             return false;
                         }
 

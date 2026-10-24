@@ -62,10 +62,38 @@ test("BS4K EPG jobs serialize before reserving tuners", async t => {
         secondFinished = true;
         return result;
     });
-    await new Promise(resolve => setTimeout(resolve, 20));
+    await new Promise(resolve => setTimeout(resolve, 150));
     assert.equal(secondFinished, false);
 
-    await jobs[0].fn({ signal: new AbortController().signal });
+    let finishFirst;
+    const ac = new AbortController();
+    _.tuner.getEPG = (channel, time, signal) => {
+        assert.equal(signal, ac.signal);
+        return new Promise(resolve => { finishFirst = resolve; });
+    };
+    const firstRun = jobs[0].fn({ signal: ac.signal });
+    ac.abort();
+    await new Promise(resolve => setTimeout(resolve, 1100));
+    assert.equal(secondFinished, false, "abort must retain ownership until stream cleanup finishes");
+    finishFirst();
+    await firstRun;
     assert.equal(await secondPromise, true);
+    _.tuner.getEPG = async () => undefined;
     await jobs[1].fn({ signal: new AbortController().signal });
+});
+
+test("aborting EPG closes its active filter and releases the request", async () => {
+    const { EventEmitter } = require("node:events");
+    const Tuner = require("../lib/Mirakurun/Tuner").default;
+    const tuner = Object.create(Tuner.prototype);
+    const filter = new EventEmitter();
+    let closed = 0;
+    filter.close = () => { closed++; filter.emit("close"); };
+    tuner._initTS = async () => filter;
+    const ac = new AbortController();
+    const pending = tuner.getEPG({ getServices: () => [{ networkId: 11 }] }, 60000, ac.signal);
+    await Promise.resolve();
+    ac.abort();
+    await pending;
+    assert.equal(closed, 1);
 });
