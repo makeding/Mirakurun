@@ -26,7 +26,7 @@ export interface JobFnOptions {
 
 export type JobFn = (options: JobFnOptions) => Promise<any>;
 
-export type ReadyFn = () => Promise<boolean>;
+export type ReadyFn = (options?: JobFnOptions) => Promise<boolean>;
 
 export interface JobItem {
     key: string;
@@ -360,7 +360,7 @@ export class Job {
 
         if (job.readyFn) {
             try {
-                skip = await job.readyFn() === false;
+                skip = await job.readyFn({ signal: job.ac.signal }) === false;
             } catch (err) {
                 const error = err instanceof Error ? err : new Error(String(err));
                 log.error(`Job#_checkReady() "${job.key}" readyFn error: ${error.message}`);

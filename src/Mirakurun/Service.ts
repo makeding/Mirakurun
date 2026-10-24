@@ -465,7 +465,7 @@ export class Service {
             key: `Service.Add.Check.${channel.type}.${channel.channel}.${serviceId}`,
             name: `Service Add Check ${channel.type}/${channel.channel}/${serviceId}`,
             fn: () => this._checkToAdd(channel, serviceId),
-            readyFn: () => _.tuner.readyForJob(channel),
+            readyFn: options => _.tuner.readyForJob(channel, options?.signal),
             retryOnFail: true,
             retryMax: (1000 * 60 * 60 * 12) / (1000 * 60 * 3), // (12時間 / retryDelay) = 12時間～
             retryDelay: 1000 * 60 * 3
@@ -477,7 +477,7 @@ export class Service {
             key: `Service.Add.Scan.${channel.type}.${channel.channel}`,
             name: `Service Add Scan ${channel.type}/${channel.channel}`,
             fn: async () => this._scan(channel, true),
-            readyFn: () => _.tuner.readyForJob(channel),
+            readyFn: options => _.tuner.readyForJob(channel, options?.signal),
             retryOnFail: true,
             retryMax: (1000 * 60 * 60 * 12) / (1000 * 60 * 3), // (12時間 / retryDelay) = 12時間～
             retryDelay: 1000 * 60 * 3
@@ -489,7 +489,7 @@ export class Service {
             key: `Service.Update.Scan.${channel.type}.${channel.channel}`,
             name: `Service Update Scan ${channel.type}/${channel.channel}`,
             fn: async () => this._scan(channel, false),
-            readyFn: () => _.tuner.readyForJob(channel),
+            readyFn: options => _.tuner.readyForJob(channel, options?.signal),
             // ストリームによる preempt 等で中断された場合も再試行する (readyForJob の remote フォールバックにより、ストリームと並行に完了できる)
             retryOnFail: true,
             retryMax: 4,

@@ -46,6 +46,7 @@ export class Channel {
     private _saveTimerId: NodeJS.Timeout;
     private _streamIDIndex = new Map<number, Map<number, StreamIDIndexItem>>();
     private _streamIDIndexDirty = true;
+    private _epgNetworkBusy = new Set<number>();
 
     constructor() {
         this._load();
@@ -373,6 +374,7 @@ export class Channel {
     }
 
     private async _epgGatherer(): Promise<void> {
+        this._epgNetworkBusy ??= new Set<number>();
         const startup = this._startup;
         if (this._startup === true) {
             this._startup = false;
@@ -393,7 +395,8 @@ export class Channel {
                         throw new Error("EPG gathering failed");
                     }
                 },
-                readyFn: async () => {
+                readyFn: async options => {
+                    const signal = options?.signal;
                     await common.sleep(100);
 
                     if (service.epgReady === true) {
@@ -419,12 +422,13 @@ export class Channel {
                         }
                     }
 
-                    return _.tuner.readyForJob(service.channel);
+                    return _.tuner.readyForJob(service.channel, signal);
                 }
             });
         };
 
         const addBS4KEPGJob = (networkId, service) => {
+            let releaseNetwork: (() => void) | undefined;
             _.job.add({
                 key: `EPG.Gather.NID.${networkId}.SID.${service.id}`,
                 name: `EPG Gather Network#${networkId} Service#${service.id}`,
@@ -437,40 +441,77 @@ export class Channel {
                     } catch (e) {
                         log.warn("Network#%d Service#%d EPG gathering has failed [%s]", networkId, service.id, e);
                         throw new Error("EPG gathering failed");
+                    } finally {
+                        releaseNetwork?.();
+                        releaseNetwork = undefined;
                     }
                 },
-                readyFn: async () => {
+                readyFn: async options => {
+                    const signal = options?.signal;
                     await common.sleep(100);
 
-                    if (status.epg[networkId] === true) {
-                        log.info("Network#%d EPG gathering is already in progress on another stream", networkId);
+                    while (this._epgNetworkBusy.has(networkId)) {
+                        if (signal?.aborted === true) {
+                            return false;
+                        }
+                        await common.sleep(1000);
+                    }
+
+                    if (signal?.aborted === true) {
                         return false;
                     }
 
-                    if (service.epgReady === true) {
-                        const now = Date.now();
-                        if (startup && now - service.epgUpdatedAt < 1000 * 60 * 10) { // 10 mins
-                            log.info("Network#%d Service#%d EPG gathering has skipped because EPG is already up to date (in 10 mins)", networkId, service.id);
+                    this._epgNetworkBusy.add(networkId);
+                    let retainNetwork = false;
+                    const release = () => {
+                        if (this._epgNetworkBusy.delete(networkId) && signal) {
+                            signal.removeEventListener("abort", release);
+                        }
+                    };
+                    signal?.addEventListener("abort", release, { once: true });
+
+                    try {
+                        if (status.epg[networkId] === true) {
+                            log.info("Network#%d EPG gathering is already in progress on another stream", networkId);
                             return false;
                         }
-                        if (now - service.epgUpdatedAt > 1000 * 60 * 60 * 12) { // 12 hours
-                            log.info("Network#%d Service#%d EPG gathering is resuming forcibly because reached maximum pause time (12 hours)", networkId, service.id);
-                            service.epgReady = false;
-                        } else {
-                            const currentPrograms = _.program.findByNetworkIdAndServiceIdAndTime(networkId, service.id, now)
-                                .filter(program => !!program.name && program.name !== "放送休止");
-                            if (currentPrograms.length === 0) {
-                                const networkServicePrograms = _.program.findByNetworkIdServiceId(networkId, service.id);
-                                if (networkServicePrograms.length > 0) {
-                                    log.info("Network#%d Service#%d EPG gathering has skipped because broadcast is off", networkId, service.id);
-                                    return false;
-                                }
+
+                        if (service.epgReady === true) {
+                            const now = Date.now();
+                            if (startup && now - service.epgUpdatedAt < 1000 * 60 * 10) { // 10 mins
+                                log.info("Network#%d Service#%d EPG gathering has skipped because EPG is already up to date (in 10 mins)", networkId, service.id);
+                                return false;
+                            }
+                            if (now - service.epgUpdatedAt > 1000 * 60 * 60 * 12) { // 12 hours
+                                log.info("Network#%d Service#%d EPG gathering is resuming forcibly because reached maximum pause time (12 hours)", networkId, service.id);
                                 service.epgReady = false;
+                            } else {
+                                const currentPrograms = _.program.findByNetworkIdAndServiceIdAndTime(networkId, service.id, now)
+                                    .filter(program => !!program.name && program.name !== "放送休止");
+                                if (currentPrograms.length === 0) {
+                                    const networkServicePrograms = _.program.findByNetworkIdServiceId(networkId, service.id);
+                                    if (networkServicePrograms.length > 0) {
+                                        log.info("Network#%d Service#%d EPG gathering has skipped because broadcast is off", networkId, service.id);
+                                        return false;
+                                    }
+                                    service.epgReady = false;
+                                }
                             }
                         }
-                    }
 
-                    return _.tuner.readyForJob(service.channel);
+                        const ready = await _.tuner.readyForJob(service.channel, signal);
+                        if (!ready) {
+                            return false;
+                        }
+
+                        releaseNetwork = release;
+                        retainNetwork = true;
+                        return true;
+                    } finally {
+                        if (!retainNetwork) {
+                            release();
+                        }
+                    }
                 }
             });
         };

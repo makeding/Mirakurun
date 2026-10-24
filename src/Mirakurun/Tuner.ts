@@ -77,7 +77,7 @@ export class Tuner {
     /**
      * readyFn
      */
-    async readyForJob(channel: ChannelItem): Promise<boolean> {
+    async readyForJob(channel: ChannelItem, signal?: AbortSignal): Promise<boolean> {
         const allDevices = this._getDevicesByChannel(channel);
         if (allDevices.length === 0) {
             log.error("readyForJob: no tuners for channel: %s (type=%s, allowedTuners=%s)", channel.name, channel.type, channel.allowedTuners?.join(",") || "any");
@@ -115,7 +115,13 @@ export class Tuner {
 
             if (device === null) {
                 log.debug("readyForJob: no pickable tuners for channel type: %s", channel.type);
+                if (signal?.aborted) {
+                    return false;
+                }
                 await common.sleep(1000 * 10);
+                if (signal?.aborted) {
+                    return false;
+                }
                 continue;
             }
 
