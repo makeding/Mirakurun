@@ -177,16 +177,27 @@ function gguideOpen(data: { maxBytes: number }): GGuideStorageState {
 
 function gguideSave(save: GGuideStorageSave): GGuideStorageState {
     return transaction(() => {
-        const state = gguideState();
+        const metadata = database.prepare("SELECT value FROM metadata WHERE key='gguide-state'").get();
+        const state = (metadata ? JSON.parse(metadata.value as string) : {}) as GGuideStorageState;
+        const assetQuery = database.prepare("SELECT metadata_json FROM gguide_assets WHERE id=?");
+        const bindingQuery = database.prepare("SELECT binding_json FROM gguide_bindings WHERE id=?");
         for (const material of save.materials) {
             if (!GGUIDE_HASH.test(material.asset.id)) { throw new QueryError("Invalid GGuide material"); }
             if (createHash("sha256").update(material.data).digest("hex") !== material.asset.id) { throw new QueryError("GGuide asset hash mismatch"); }
-            const prior = state.assets.find(asset => asset.id === material.asset.id);
+            const row = assetQuery.get(material.asset.id);
+            const prior = row ? JSON.parse(row.metadata_json as string) as apid.GGuideAsset : undefined;
             if (prior) {
                 prior.lastReceivedAt = Math.max(prior.lastReceivedAt, material.asset.lastReceivedAt);
+                const sourceKey = (source: apid.GGuideSource) => JSON.stringify([source.channelType, source.channel,
+                    source.serviceId, source.pid, source.moduleHash, source.recordOffset, source.imageOffset]);
+                const sources = new Map(prior.sources.map(source => [sourceKey(source), source]));
                 for (const source of material.asset.sources) {
-                    const old = prior.sources.find(item => canonical([item.channelType, item.channel, item.serviceId, item.pid, item.moduleHash, item.recordOffset, item.imageOffset]) === canonical([source.channelType, source.channel, source.serviceId, source.pid, source.moduleHash, source.recordOffset, source.imageOffset]));
-                    if (old) { old.lastReceivedAt = Math.max(old.lastReceivedAt, source.lastReceivedAt); } else { prior.sources.push(source); }
+                    const key = sourceKey(source);
+                    const old = sources.get(key);
+                    if (old) { old.lastReceivedAt = Math.max(old.lastReceivedAt, source.lastReceivedAt); } else {
+                        prior.sources.push(source);
+                        sources.set(key, source);
+                    }
                 }
                 database.prepare("UPDATE gguide_assets SET metadata_json=?,last_received_at=? WHERE id=?").run(JSON.stringify(prior), prior.lastReceivedAt, prior.id);
             } else {
@@ -200,9 +211,9 @@ function gguideSave(save: GGuideStorageSave): GGuideStorageState {
             database.prepare("INSERT INTO gguide_modules(id,data,received_at) VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET received_at=MAX(received_at,excluded.received_at)").run(id, data, save.result?.finishedAt || Date.now());
         }
         for (const binding of save.bindings) {
-            const prior = state.bindings.find(item => item.id === binding.id);
+            const row = bindingQuery.get(binding.id);
+            const prior = row ? JSON.parse(row.binding_json as string) as apid.GGuideBinding : undefined;
             const next = prior ? { ...prior, ...binding, firstReceivedAt: Math.min(prior.firstReceivedAt, binding.firstReceivedAt), members: binding.kind === "pap" ? binding.members : mergeMembers(prior.members, binding.members) } : binding;
-            if (prior) { Object.assign(prior, next); } else { state.bindings.push(next); }
             database.prepare("INSERT OR REPLACE INTO gguide_bindings(id,binding_json,last_received_at) VALUES (?,?,?)")
                 .run(next.id, JSON.stringify(next), next.lastReceivedAt);
         }

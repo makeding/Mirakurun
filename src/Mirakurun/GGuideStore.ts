@@ -37,6 +37,18 @@ export default class GGuideStore {
     get enabled(): boolean { return this.state.enabled !== false; }
     get lastCollection(): apid.GGuideCollectionResult | undefined { return structuredClone(this.state.lastCollection); }
 
+    get assetCount(): number {
+        this.assertReady();
+        const cutoff = Date.now() - GGUIDE_RETENTION_MS;
+        return this.state.assets.filter(asset => asset.lastReceivedAt > cutoff).length;
+    }
+
+    get bindingCount(): number {
+        this.assertReady();
+        const cutoff = Date.now() - GGUIDE_RETENTION_MS;
+        return this.state.bindings.filter(binding => binding.lastReceivedAt > cutoff).length;
+    }
+
     async init(): Promise<void> {
         this.apply(await this.history.gguideOpen(this.maxBytes));
         this.ready = true;

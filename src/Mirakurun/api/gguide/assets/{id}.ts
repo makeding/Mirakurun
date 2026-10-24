@@ -28,9 +28,10 @@ export const get: Operation = async (req, res, next) => {
         }
         res.setHeader("Content-Type", material.asset.mimeType);
         res.setHeader("X-Content-Type-Options", "nosniff");
-        res.setHeader("Content-Length", material.data.length);
-        res.setHeader("Cache-Control", "private, max-age=0, must-revalidate");
+        res.setHeader("Cache-Control", "private, max-age=604800, immutable");
         res.setHeader("ETag", `"${material.asset.id}"`);
+        if (req.fresh) { res.status(304).end(); return; }
+        res.setHeader("Content-Length", material.data.length);
         res.status(200).end(material.data);
     } catch (err) { next(err); }
 };
@@ -38,6 +39,7 @@ get.apiDoc = {
     tags: ["gguide"], operationId: "getGGuideAsset", produces: ["image/png", "image/jpeg", "application/json"],
     responses: {
         200: { description: "Independently displayable image bytes" },
+        304: { description: "Image content matches the supplied ETag" },
         404: { description: "Unknown material" },
         422: { description: "External palette or other decoding dependency is unresolved" },
         default: { description: "Error", schema: { $ref: "#/definitions/Error" } }

@@ -68,8 +68,8 @@ export default class GGuide {
             targets: this.getTargets(),
             passiveEnabled: this.passiveEnabled,
             passiveCollections: this.passive.size,
-            bindingCount: this.initialized ? this.store.bindings().length : 0,
-            assetCount: this.initialized ? this.store.list().length : 0,
+            bindingCount: this.initialized ? this.store.bindingCount : 0,
+            assetCount: this.initialized ? this.store.assetCount : 0,
             lastCollection: this.lastResult || this.store.lastCollection,
             error: this.storageError || (!this.decodeBytes ? "Invalid GGuide decoder key" : undefined)
         };
