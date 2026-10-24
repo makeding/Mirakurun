@@ -15,9 +15,9 @@
 */
 import { createHash } from "crypto";
 import * as apid from "../../api";
-import type { GGuideStorageState, ProgramHistory } from "./ProgramHistory";
+import type { GGuideStorageState, GGuideStorageUpdate, ProgramHistory } from "./ProgramHistory";
 
-import { GGuideIndexFact, resolveGGuidePrograms } from "./GGuideProgramIndex";
+import { GGuideIndexFact, mergeGGuideIndex, resolveGGuidePrograms } from "./GGuideProgramIndex";
 
 export interface GGuideMaterial {
     asset: apid.GGuideAsset;
@@ -100,7 +100,7 @@ export default class GGuideStore {
 
     async save(materials: GGuideMaterial[], modules: Map<string, Buffer>, result: apid.GGuideCollectionResult | undefined,
         bindings: apid.GGuideBinding[] = [], programIndex: GGuideIndexFact[] = []): Promise<void> {
-        return this.exclusive(async () => this.apply(await this.history.gguideSave({
+        return this.exclusive(async () => this.applyUpdate(await this.history.gguideSave({
             materials, modules: [...modules], result, bindings, programIndex, maxBytes: this.maxBytes
         })));
     }
@@ -118,7 +118,25 @@ export default class GGuideStore {
     }
 
     private apply(state: GGuideStorageState): void {
-        this.state = structuredClone(state);
+        // Worker replies already have exclusive ownership through postMessage.
+        this.state = state;
+        this.resolved = undefined;
+    }
+    private applyUpdate(update: GGuideStorageUpdate): void {
+        const assets = new Map(this.state.assets.map(asset => [asset.id, asset]));
+        const bindings = new Map(this.state.bindings.map(binding => [binding.id, binding]));
+        for (const asset of update.assets) { assets.set(asset.id, asset); }
+        for (const binding of update.bindings) { bindings.set(binding.id, binding); }
+        this.state.assets = [...assets.values()].sort((a, b) => a.id.localeCompare(b.id));
+        this.state.bindings = [...bindings.values()].sort((a, b) => a.id.localeCompare(b.id));
+        for (const id of update.modules) {
+            if (!this.state.modules.includes(id)) { this.state.modules.push(id); }
+            this.state.moduleReceivedAt[id] = Math.max(this.state.moduleReceivedAt[id] || 0, update.moduleReceivedAt[id]);
+        }
+        if (update.programIndex?.length) {
+            this.state.programIndex = mergeGGuideIndex(this.state.programIndex || [], update.programIndex, update.cutoff);
+        }
+        if (update.lastCollection) { this.state.lastCollection = update.lastCollection; }
         this.resolved = undefined;
     }
     private assertReady(): void { if (!this.ready) { throw new Error("GGuide storage unavailable"); } }

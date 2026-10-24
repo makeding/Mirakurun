@@ -46,6 +46,11 @@ export interface GGuideStorageState {
     lastCollection?: apid.GGuideCollectionResult;
 }
 
+/** Only rows changed by one committed capture publication. */
+export interface GGuideStorageUpdate extends GGuideStorageState {
+    cutoff: number;
+}
+
 export interface GGuideStorageMaterial {
     asset: apid.GGuideAsset;
     data: Buffer;
@@ -200,7 +205,7 @@ export class ProgramHistory {
         return this._request("gguideOpen", { maxBytes });
     }
 
-    async gguideSave(save: GGuideStorageSave): Promise<GGuideStorageState> {
+    async gguideSave(save: GGuideStorageSave): Promise<GGuideStorageUpdate> {
         return this._request("gguideSave", save);
     }
 

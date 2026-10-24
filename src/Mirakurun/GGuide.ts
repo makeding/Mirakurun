@@ -19,7 +19,7 @@ import _ from "./_";
 import { channelTypes } from "./common";
 import * as log from "./log";
 import GGuideStore, { GGUIDE_RETENTION_MS } from "./GGuideStore";
-import { createGGuideCapture } from "./GGuideCapture";
+import { createGGuideCapture, createGGuidePublication } from "./GGuideCapture";
 import { enrichGGuideEpg } from "./GGuideEpg";
 import StreamFilter from "./StreamFilter";
 
@@ -239,7 +239,7 @@ export default class GGuide {
         session.capture.carousel.close();
         session.queue = [];
         this.passiveCooldown.set(targetKey(session.request), Date.now() + 6 * 60 * 60 * 1000);
-        const { materials, modules, bindings, programIndex, seen } = session.capture;
+        const { materials, bindings, programIndex, seen } = session.capture;
         if (error) {
             void session.stopPublishing();
             log.warn("GGuide passive observation stopped: %s", error.message);
@@ -248,32 +248,42 @@ export default class GGuide {
         if (!materials.size && !bindings.length && !programIndex.size) { void session.stopPublishing(); return; }
         const result: apid.GGuideCollectionResult = { ...session.request, startedAt: session.startedAt,
             finishedAt: Date.now(), status: "completed", assetCount: materials.size, moduleCount: seen.size };
-        const save = session.stopPublishing().then(() => this.store.save([...materials.values()], modules, result, bindings, [...programIndex.values()]))
+        const save = session.stopPublishing(result)
             .then(() => { this.lastResult = result; })
             .catch(err => { log.error("GGuide passive save failed: %s", err.message); })
             .finally(() => this.pendingSaves.delete(save));
         this.pendingSaves.add(save);
     }
 
-    private publishDuringCapture(capture: ReturnType<typeof createGGuideCapture>, onError: (error: Error) => void): () => Promise<void> {
+    private publishDuringCapture(capture: ReturnType<typeof createGGuideCapture>, onError: (error: Error) => void):
+        (result?: apid.GGuideCollectionResult) => Promise<void> {
         let published = 0;
         let pending: Promise<void>;
-        const timer = setInterval(() => {
-            if (pending || published === capture.seen.size || (!capture.materials.size && !capture.bindings.length && !capture.programIndex.size)) { return; }
+        const snapshot = createGGuidePublication(capture);
+        const publish = async (result?: apid.GGuideCollectionResult) => {
             const revision = capture.seen.size;
-            // Snapshot metadata so reception cannot mutate an in-flight publication.
-            const materials = [...capture.materials.values()].map(item => ({ data: item.data, asset: structuredClone(item.asset) }));
-            const modules = new Map(capture.modules);
-            const bindings = structuredClone(capture.bindings);
-            const save = this.store.save(materials, modules, undefined, bindings, structuredClone([...capture.programIndex.values()]))
-                .then(() => { published = revision; })
-                .catch(onError)
+            const batch = snapshot();
+            if (!result && !batch.materials.length && !batch.modules.size && !batch.bindings.length && !batch.programIndex.length) {
+                published = revision;
+                return;
+            }
+            await this.store.save(batch.materials, batch.modules, result, batch.bindings, batch.programIndex);
+            batch.commit();
+            published = revision;
+        };
+        const timer = setInterval(() => {
+            if (pending || published === capture.seen.size) { return; }
+            const save = publish().catch(onError)
                 .finally(() => { this.pendingSaves.delete(save); pending = undefined; });
             pending = save;
             this.pendingSaves.add(save);
         }, 2000);
         timer.unref();
-        return async () => { clearInterval(timer); await pending; };
+        return async result => {
+            clearInterval(timer);
+            await pending;
+            if (result) { await publish(result); }
+        };
     }
 
     private async collectTargets(signal: AbortSignal): Promise<void> {
@@ -390,7 +400,7 @@ export default class GGuide {
             }
             const result: apid.GGuideCollectionResult = { ...request, startedAt, finishedAt: Date.now(),
                 status: "completed", assetCount: materials.size, moduleCount: seen.size };
-            await this.store.save([...materials.values()], modules, result, bindings, [...programIndex.values()]);
+            await stopPublishing(result);
             this.lastResult = result;
         } catch (err) {
             this.lastResult = { ...request, startedAt, finishedAt: Date.now(),
@@ -427,7 +437,7 @@ interface PassiveCapture {
     bytes: number;
     startedAt: number;
     ending: boolean;
-    stopPublishing?: () => Promise<void>;
+    stopPublishing?: (result?: apid.GGuideCollectionResult) => Promise<void>;
     timer?: NodeJS.Timeout;
     immediate?: NodeJS.Immediate;
 }

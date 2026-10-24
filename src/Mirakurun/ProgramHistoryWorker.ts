@@ -22,7 +22,7 @@ import { existsSync, mkdirSync, readFileSync } from "fs";
 import { dirname } from "path";
 import * as apid from "../../api";
 import { Program } from "./db";
-import type { GGuideStorageSave, GGuideStorageState, HistoryMutation, HistoryOptions } from "./ProgramHistory";
+import type { GGuideStorageSave, GGuideStorageState, GGuideStorageUpdate, HistoryMutation, HistoryOptions } from "./ProgramHistory";
 import sift from "sift";
 import { rejectWhere } from "./common";
 import { mergeGGuideIndex } from "./GGuideProgramIndex";
@@ -175,10 +175,13 @@ function gguideOpen(data: { maxBytes: number }): GGuideStorageState {
     return gguideState();
 }
 
-function gguideSave(save: GGuideStorageSave): GGuideStorageState {
+function gguideSave(save: GGuideStorageSave): GGuideStorageUpdate {
     return transaction(() => {
-        const metadata = database.prepare("SELECT value FROM metadata WHERE key='gguide-state'").get();
-        const state = (metadata ? JSON.parse(metadata.value as string) : {}) as GGuideStorageState;
+        const cutoff = Date.now() - GGUIDE_RETENTION_MS;
+        const update: GGuideStorageUpdate = { cutoff, assets: [], bindings: [], modules: [], moduleReceivedAt: {},
+            programIndex: save.programIndex || [], lastCollection: save.result };
+        const assets = new Map<string, apid.GGuideAsset>();
+        const bindings = new Map<string, apid.GGuideBinding>();
         const assetQuery = database.prepare("SELECT metadata_json FROM gguide_assets WHERE id=?");
         const bindingQuery = database.prepare("SELECT binding_json FROM gguide_bindings WHERE id=?");
         for (const material of save.materials) {
@@ -200,15 +203,20 @@ function gguideSave(save: GGuideStorageSave): GGuideStorageState {
                     }
                 }
                 database.prepare("UPDATE gguide_assets SET metadata_json=?,last_received_at=? WHERE id=?").run(JSON.stringify(prior), prior.lastReceivedAt, prior.id);
+                assets.set(prior.id, prior);
             } else {
                 database.prepare("INSERT INTO gguide_assets(id,metadata_json,data,last_received_at) VALUES (?,?,?,?)")
                     .run(material.asset.id, JSON.stringify(material.asset), material.data, material.asset.lastReceivedAt);
+                assets.set(material.asset.id, material.asset);
             }
         }
         for (const [id, data] of save.modules) {
             if (!GGUIDE_HASH.test(id)) { throw new QueryError("Invalid GGuide module"); }
             if (createHash("sha256").update(data).digest("hex") !== id) { throw new QueryError("GGuide module hash mismatch"); }
-            database.prepare("INSERT INTO gguide_modules(id,data,received_at) VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET received_at=MAX(received_at,excluded.received_at)").run(id, data, save.result?.finishedAt || Date.now());
+            const receivedAt = save.result?.finishedAt || Date.now();
+            database.prepare("INSERT INTO gguide_modules(id,data,received_at) VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET received_at=MAX(received_at,excluded.received_at)").run(id, data, receivedAt);
+            update.modules.push(id);
+            update.moduleReceivedAt[id] = receivedAt;
         }
         for (const binding of save.bindings) {
             const row = bindingQuery.get(binding.id);
@@ -216,12 +224,20 @@ function gguideSave(save: GGuideStorageSave): GGuideStorageState {
             const next = prior ? { ...prior, ...binding, firstReceivedAt: Math.min(prior.firstReceivedAt, binding.firstReceivedAt), members: binding.kind === "pap" ? binding.members : mergeMembers(prior.members, binding.members) } : binding;
             database.prepare("INSERT OR REPLACE INTO gguide_bindings(id,binding_json,last_received_at) VALUES (?,?,?)")
                 .run(next.id, JSON.stringify(next), next.lastReceivedAt);
+            bindings.set(next.id, next);
         }
-        state.programIndex = mergeGGuideIndex(state.programIndex || [], save.programIndex || [], Date.now() - GGUIDE_RETENTION_MS);
-        if (save.result) { state.lastCollection = save.result; }
-        putGGuideState(state);
+        // Image-only publications must not parse/rewrite the entire program index.
+        if (save.programIndex?.length || save.result) {
+            const metadata = database.prepare("SELECT value FROM metadata WHERE key='gguide-state'").get();
+            const state = (metadata ? JSON.parse(metadata.value as string) : {}) as GGuideStorageState;
+            if (save.programIndex?.length) { state.programIndex = mergeGGuideIndex(state.programIndex || [], save.programIndex, cutoff); }
+            if (save.result) { state.lastCollection = save.result; }
+            putGGuideState(state);
+        }
         if (gguideBytes() > save.maxBytes) { throw new QueryError("GGuide storage budget exhausted"); }
-        return gguideState();
+        update.assets = [...assets.values()];
+        update.bindings = [...bindings.values()];
+        return update;
     });
 }
 

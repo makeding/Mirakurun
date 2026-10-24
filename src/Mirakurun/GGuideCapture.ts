@@ -85,3 +85,35 @@ export function createGGuideCapture(request: apid.GGuideCollectionRequest, paylo
     } });
     return { materials, modules, bindings, programIndex, seen, carousel };
 }
+
+/** Acknowledge only a committed snapshot; reception may advance during SQLite I/O. */
+export function createGGuidePublication(capture: ReturnType<typeof createGGuideCapture>) {
+    const publishedMaterials = new Map<string, { sources: number; receivedAt: number }>();
+    const publishedModules = new Set<string>();
+    const publishedFacts = new Map<string, GGuideIndexFact>();
+    let publishedBindings = 0;
+    return () => {
+        const versions = new Map<string, { sources: number; receivedAt: number }>();
+        const materials: GGuideMaterial[] = [];
+        for (const [id, item] of capture.materials) {
+            const version = { sources: item.asset.sources.length, receivedAt: item.asset.lastReceivedAt };
+            const prior = publishedMaterials.get(id);
+            if (prior?.sources === version.sources && prior?.receivedAt === version.receivedAt) { continue; }
+            versions.set(id, version);
+            materials.push({ data: item.data, asset: structuredClone(item.asset) });
+        }
+        const modules = new Map([...capture.modules].filter(([id]) => !publishedModules.has(id)));
+        const bindingCount = capture.bindings.length;
+        const bindings = capture.bindings.slice(publishedBindings, bindingCount);
+        const facts = [...capture.programIndex].filter(([id, fact]) => publishedFacts.get(id) !== fact);
+        return {
+            materials, modules, bindings, programIndex: facts.map(([, fact]) => fact),
+            commit: () => {
+                for (const [id, version] of versions) { publishedMaterials.set(id, version); }
+                for (const id of modules.keys()) { publishedModules.add(id); }
+                for (const [id, fact] of facts) { publishedFacts.set(id, fact); }
+                publishedBindings = bindingCount;
+            }
+        };
+    };
+}
