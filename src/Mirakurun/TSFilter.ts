@@ -1203,7 +1203,6 @@ export default class TSFilter extends EventEmitter {
             if (this._output.writableEnded === false) {
                 this._output.end();
             }
-            this._output.removeAllListeners();
             delete this._output;
         }
 

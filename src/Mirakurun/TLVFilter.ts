@@ -699,7 +699,7 @@ export default class TLVFilter extends EventEmitter {
             if (this._output.writableEnded === false) {
                 this._output.end();
             }
-            this._output.removeAllListeners();
+            // Keep pipe listeners until end/finish propagate to the HTTP consumer.
             delete this._output;
         }
 
