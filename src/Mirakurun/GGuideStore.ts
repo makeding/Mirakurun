@@ -18,6 +18,7 @@ import * as apid from "../../api";
 import type { GGuideStorageState, GGuideStorageUpdate, ProgramHistory } from "./ProgramHistory";
 
 import { GGuideIndexFact, mergeGGuideIndex, resolveGGuidePrograms } from "./GGuideProgramIndex";
+import { GGuideReceptionUpdate, mergeGGuideReception } from "./GGuideReception";
 
 export interface GGuideMaterial {
     asset: apid.GGuideAsset;
@@ -37,6 +38,9 @@ export default class GGuideStore {
 
     get enabled(): boolean { return this.state.enabled !== false; }
     get lastCollection(): apid.GGuideCollectionResult | undefined { return structuredClone(this.state.lastCollection); }
+    get reception(): Required<GGuideReceptionUpdate> {
+        return structuredClone(mergeGGuideReception(this.state, {}, Date.now() - GGUIDE_RETENTION_MS));
+    }
 
     get assetCount(): number {
         this.assertReady();
@@ -99,9 +103,9 @@ export default class GGuideStore {
     }
 
     async save(materials: GGuideMaterial[], modules: Map<string, Buffer>, result: apid.GGuideCollectionResult | undefined,
-        bindings: apid.GGuideBinding[] = [], programIndex: GGuideIndexFact[] = []): Promise<void> {
+        bindings: apid.GGuideBinding[] = [], programIndex: GGuideIndexFact[] = [], reception: GGuideReceptionUpdate = {}): Promise<void> {
         return this.exclusive(async () => this.applyUpdate(await this.history.gguideSave({
-            materials, modules: [...modules], result, bindings, programIndex, maxBytes: this.maxBytes
+            materials, modules: [...modules], result, bindings, programIndex, ...reception, maxBytes: this.maxBytes
         })));
     }
 
@@ -137,6 +141,9 @@ export default class GGuideStore {
             this.state.programIndex = mergeGGuideIndex(this.state.programIndex || [], update.programIndex, update.cutoff);
         }
         if (update.lastCollection) { this.state.lastCollection = update.lastCollection; }
+        if (update.receptionPlans?.length || update.receptionProgress?.length) {
+            Object.assign(this.state, mergeGGuideReception(this.state, update, update.cutoff));
+        }
         this.resolved = undefined;
     }
     private assertReady(): void { if (!this.ready) { throw new Error("GGuide storage unavailable"); } }

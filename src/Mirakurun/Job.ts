@@ -72,6 +72,8 @@ export interface FinishedJobItem extends Omit<RunningJobItem, "ac"> {
 export interface ScheduleItem {
     key: string;
     job: JobItem;
+    /** Select due automatic work at each tick; manual Run always uses job. */
+    scheduledJob?: () => JobItem | undefined;
     /**
      * crontab like format.
      * `m h dom mon dow`
@@ -289,8 +291,10 @@ export class Job {
         for (const schedule of this._scheduleItemSet) {
             try {
                 if (matchCronExpression(schedule.schedule, date)) {
+                    const selected = schedule.scheduledJob ? schedule.scheduledJob() : schedule.job;
+                    if (!selected) { continue; }
                     // スケジュールされたジョブを追加する前にリトライカウントをリセット
-                    const job = { ...schedule.job, retryCount: 0 };
+                    const job = { ...selected, retryCount: 0 };
                     this.add(job);
                 }
             } catch (err) {

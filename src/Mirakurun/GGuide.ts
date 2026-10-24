@@ -23,6 +23,8 @@ import { createGGuideCapture, createGGuidePublication } from "./GGuideCapture";
 import { enrichGGuideEpg } from "./GGuideEpg";
 import StreamFilter from "./StreamFilter";
 import ChannelItem from "./ChannelItem";
+import type { JobItem } from "./Job";
+import { dueGGuideReception, GGuideReceptionSlot } from "./GGuideReception";
 
 const JOB_PREFIX = "gguide:";
 
@@ -48,7 +50,7 @@ export default class GGuide {
 
     constructor(options: { maxBytes?: number; preserveModules?: boolean } = {}) {
         const config = _.config.server;
-        this.schedule = config?.gguideSchedule ?? "20 5,11,17,23 * * *";
+        this.schedule = config?.gguideSchedule ?? "auto";
         this.passiveEnabled = config?.gguidePassive !== false;
         this.decodeBytes = Buffer.from([0xb1, 0x38, 0x97, 0x43, 0xb0, 0xa9, 0xdb, 0x8f].reverse().map(value => value ^ 0xa5));
         this.preserveModules = options.preserveModules ?? config?.gguidePreserveModules ?? false;
@@ -85,22 +87,11 @@ export default class GGuide {
             }, 60000);
             this.cleanupTimer.unref();
             if (this.schedule) {
-                _.job.addSchedule({ key: "gguide:scheduled", schedule: this.schedule, job: {
-                    key: "gguide:scheduled", name: "HGuide Getherer", isRerunnable: false,
-                    retryOnAbort: false, retryOnFail: false,
-                    fn: async ({ signal }) => {
-                        if (!this.store.enabled) { return; }
-                        if (!this.decodeBytes || this.shutdown.signal.aborted) { throw new Error("GGuide decoder unavailable"); }
-                        if (this.active) { throw new Error("A GGuide collection is already running"); }
-                        for (const [id, session] of this.passive) { this.finishPassive(id, session); }
-                        const run = async () => {
-                            await Promise.all([...this.pendingSaves]);
-                            await this.collectTargets(AbortSignal.any([signal, this.shutdown.signal]));
-                        };
-                        this.active = run();
-                        try { await this.active; } finally { this.active = undefined; }
-                    }
-                } });
+                _.job.addSchedule({ key: "gguide:scheduled", schedule: this.schedule === "auto" ? "* * * * *" : this.schedule,
+                    job: this.collectionJob(),
+                    scheduledJob: this.schedule === "auto" ? () =>
+                        this.store.enabled && !this.isCollecting() && this.getAutomaticTargets().length ? this.collectionJob(true) : undefined : undefined
+                });
             }
         } catch (err) {
             this.storageError = "GGuide storage unavailable; inspect the database error log";
@@ -156,7 +147,7 @@ export default class GGuide {
             retryOnAbort: false,
             retryOnFail: false,
             fn: async ({ signal }) => {
-                this.active = this.collect(request, channel, AbortSignal.any([signal, this.shutdown.signal]));
+                this.active = this.collect(request, channel, AbortSignal.any([signal, this.shutdown.signal])).then(() => undefined);
                 try { await this.active; } finally { this.active = undefined; }
             }
         });
@@ -216,6 +207,25 @@ export default class GGuide {
         this.decodeBytes?.fill(0);
     }
 
+    private collectionJob(automatic = false): JobItem {
+        return {
+            key: "gguide:scheduled", name: "HGuide Getherer", isRerunnable: false,
+            retryOnAbort: false, retryOnFail: false,
+            fn: async ({ signal }) => {
+                if (!this.store.enabled) { return; }
+                if (!this.decodeBytes || this.shutdown.signal.aborted) { throw new Error("GGuide decoder unavailable"); }
+                if (this.active) { throw new Error("A GGuide collection is already running"); }
+                for (const [id, session] of this.passive) { this.finishPassive(id, session); }
+                const run = async () => {
+                    await Promise.all([...this.pendingSaves]);
+                    await this.collectTargets(AbortSignal.any([signal, this.shutdown.signal]), automatic);
+                };
+                this.active = run();
+                try { await this.active; } finally { this.active = undefined; }
+            }
+        };
+    }
+
     private drainPassive(tunerId: number, session: PassiveCapture): void {
         if (session.immediate) { return; }
         session.immediate = setImmediate(() => {
@@ -242,13 +252,13 @@ export default class GGuide {
         session.capture.carousel.close();
         session.queue = [];
         this.passiveCooldown.set(targetKey(session.request), { request: session.request, until: Date.now() + 6 * 60 * 60 * 1000 });
-        const { materials, bindings, programIndex, seen } = session.capture;
+        const { materials, bindings, programIndex, receptionPlans, seen } = session.capture;
         if (error) {
             void session.stopPublishing();
             log.warn("GGuide passive observation stopped: %s", error.message);
             return;
         }
-        if (!materials.size && !bindings.length && !programIndex.size) { void session.stopPublishing(); return; }
+        if (!materials.size && !bindings.length && !programIndex.size && !receptionPlans.size) { void session.stopPublishing(); return; }
         const result: apid.GGuideCollectionResult = { ...session.request, startedAt: session.startedAt,
             finishedAt: Date.now(), status: "completed", assetCount: materials.size, moduleCount: seen.size };
         const save = session.stopPublishing(result)
@@ -266,11 +276,11 @@ export default class GGuide {
         const publish = async (result?: apid.GGuideCollectionResult) => {
             const revision = capture.seen.size;
             const batch = snapshot();
-            if (!result && !batch.materials.length && !batch.modules.size && !batch.bindings.length && !batch.programIndex.length) {
+            if (!result && !batch.materials.length && !batch.modules.size && !batch.bindings.length && !batch.programIndex.length && !batch.receptionPlans.length) {
                 published = revision;
                 return;
             }
-            await this.store.save(batch.materials, batch.modules, result, batch.bindings, batch.programIndex);
+            await this.store.save(batch.materials, batch.modules, result, batch.bindings, batch.programIndex, { receptionPlans: batch.receptionPlans });
             batch.commit();
             published = revision;
         };
@@ -289,8 +299,16 @@ export default class GGuide {
         };
     }
 
-    private async collectTargets(signal: AbortSignal): Promise<void> {
-        const targets = this.getTargets();
+    private getAutomaticTargets(now = Date.now()): GGuideReceptionSlot[] {
+        const { receptionPlans, receptionProgress } = this.store.reception;
+        return this.getTargets().map(request => dueGGuideReception(request,
+            receptionPlans.filter(plan => this.sameSource(plan, request)),
+            receptionProgress.filter(item => this.sameSource(item, request)).sort((a, b) => b.attemptedAt - a.attemptedAt), now))
+            .filter((slot): slot is GGuideReceptionSlot => !!slot);
+    }
+
+    private async collectTargets(signal: AbortSignal, automatic = false): Promise<void> {
+        const targets = automatic ? this.getAutomaticTargets().map(slot => slot.request) : this.getTargets();
         const running = new Map<Promise<void>, string>();
         const errors: Error[] = [];
         const capacity = (type: string) => Math.max(1, _.config.tuners.filter(tuner =>
@@ -309,7 +327,24 @@ export default class GGuide {
                     signal.throwIfAborted();
                     const channel = _.channel.get(target.channelType, target.channel);
                     if (!channel) { throw new Error(`GGuide channel not configured: ${target.channelType}/${target.channel}`); }
-                    await this.collect(target, channel, signal);
+                    if (!automatic) { await this.collect(target, channel, signal); return; }
+                    // Job queueing or another source's capture may have consumed the window.
+                    const slot = this.getAutomaticTargets().find(item => this.sameSource(item.request, target));
+                    if (!slot) { return; }
+                    const progress = { channelType: target.channelType, channel: target.channel,
+                        phase: slot.phase, cycle: slot.cycle, windowStart: slot.startAt, attemptedAt: Date.now() };
+                    await this.store.save([], new Map(), undefined, [], [], { receptionProgress: [progress] });
+                    signal.throwIfAborted();
+                    if (Date.now() >= slot.endAt) { return; }
+                    const completed = await this.collect(slot.request, channel, signal, slot.endAt);
+                    if (completed || slot.phase === "discovery") {
+                        const learned = completed && slot.phase === "discovery" ? this.getAutomaticTargets(progress.attemptedAt)
+                            .find(item => this.sameSource(item.request, target) && item.phase !== "discovery" && item.startAt <= progress.attemptedAt) : undefined;
+                        const completedProgress = learned ? { ...progress, phase: learned.phase, cycle: learned.cycle, windowStart: learned.startAt } : undefined;
+                        await this.store.save([], new Map(), undefined, [], [],
+                            { receptionProgress: [progress, ...completedProgress ? [completedProgress] : []]
+                                .map(item => ({ ...item, completedAt: Date.now() })) });
+                    }
                 }).catch(err => {
                     errors.push(err);
                     log.warn("HGuide capture %s/%s failed: %s", target.channelType, target.channel, err.message);
@@ -333,8 +368,12 @@ export default class GGuide {
                 targets[index] = channel;
             }
         }
-        return targets.map(channel => ({ channelType: channel.type, channel: channel.channel,
-            durationSeconds: _.config.server.gguideDurationSeconds ?? 1800 }));
+        return targets.map(channel => {
+            const service = _.service?.findByChannel(channel).find(item => /^(?:Gガイド|G-?GUIDE)$/i.test(item.name.normalize("NFKC").trim()));
+            return { channelType: channel.type, channel: channel.channel,
+                ...service ? { serviceId: service.serviceId } : {},
+                durationSeconds: _.config.server.gguideDurationSeconds ?? 1800 };
+        });
     }
 
     private sameSource(first: apid.GGuideCollectionRequest, second: apid.GGuideCollectionRequest): boolean {
@@ -351,7 +390,8 @@ export default class GGuide {
         if (!this.initialized) { throw new GGuideError(503, this.storageError || "GGuide storage unavailable"); }
     }
 
-    private async collect(request: apid.GGuideCollectionRequest, channel: { getStream: (...args: any[]) => Promise<StreamFilter> }, signal: AbortSignal): Promise<void> {
+    private async collect(request: apid.GGuideCollectionRequest, channel: { getStream: (...args: any[]) => Promise<StreamFilter> },
+        signal: AbortSignal, deadline?: number): Promise<boolean> {
         const startedAt = Date.now();
         const decoded = createGGuideCapture(request, this.decodeBytes, this.preserveModules);
         const { materials, modules, bindings, programIndex, seen, carousel } = decoded;
@@ -395,14 +435,15 @@ export default class GGuide {
         signal.addEventListener("abort", abort, { once: true });
         try {
             signal.throwIfAborted();
-            idleTimer = setTimeout(() => finish(new Error("GGuide tuner acquisition timed out")), 30000);
+            idleTimer = setTimeout(() => finish(new Error("GGuide tuner acquisition timed out")),
+                Math.max(1, Math.min(30000, (deadline ?? Infinity) - Date.now())));
             const acquisition = channel.getStream({
                 id: "Mirakurun:GGuide", priority: -1, disableDecoder: true, disableMMTSDecoder: true
             }, output).then(acquired => {
-                if (ended) { acquired.close(); return; }
+                if (ended || Date.now() >= deadline) { acquired.close(); finish(new Error("GGuide reception window expired")); return; }
                 filter = acquired;
                 filter.once("close", () => finish(new Error("GGuide tuner was closed or preempted")));
-                timer = setTimeout(() => finish(), request.durationSeconds * 1000);
+                timer = setTimeout(() => finish(), Math.max(1, Math.min(request.durationSeconds * 1000, (deadline ?? Infinity) - Date.now())));
                 if (!request.serviceId) {
                     probeTimer = setTimeout(() => { if (!carousel.selectedServiceId) { finish(); } }, 10000);
                 }
@@ -411,14 +452,15 @@ export default class GGuide {
             await capture;
             await stopPublishing();
             signal.throwIfAborted();
-            if (!request.serviceId && !carousel.selectedServiceId) { return; }
-            if (!materials.size && !bindings.length && !programIndex.size) {
+            if (!request.serviceId && !carousel.selectedServiceId) { return false; }
+            if (!materials.size && !bindings.length && !programIndex.size && !decoded.receptionPlans.size) {
                 throw new Error("No GGuide materials or bindings received; check service, key and capture window");
             }
             const result: apid.GGuideCollectionResult = { ...request, startedAt, finishedAt: Date.now(),
                 status: "completed", assetCount: materials.size, moduleCount: seen.size };
             await stopPublishing(result);
             this.lastResult = result;
+            return true;
         } catch (err) {
             this.lastResult = { ...request, startedAt, finishedAt: Date.now(),
                 status: signal.aborted ? "aborted" : "failed", assetCount: 0, moduleCount: seen.size,

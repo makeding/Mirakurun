@@ -215,8 +215,8 @@ export async function loadServer(): Promise<Server> {
     }
 
     if (config.gguideSchedule !== undefined && (typeof config.gguideSchedule !== "string" ||
-        (config.gguideSchedule !== "" && !isValidCronExpression(config.gguideSchedule)))) {
-        throw new Error("invalid gguideSchedule: expected five-field cron or empty string");
+        (config.gguideSchedule !== "" && config.gguideSchedule !== "auto" && !isValidCronExpression(config.gguideSchedule)))) {
+        throw new Error("invalid gguideSchedule: expected auto, five-field cron or empty string");
     }
     if (config.gguidePassive !== undefined && typeof config.gguidePassive !== "boolean") {
         throw new Error("invalid gguidePassive: expected boolean");

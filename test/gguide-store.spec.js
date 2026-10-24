@@ -81,7 +81,7 @@ test("reuses resolved associations until a write or the earliest fact, binding o
 
 test("capture publication acknowledges only committed deltas, including arrivals during a pending write", () => {
     const { createGGuidePublication } = require("../lib/Mirakurun/GGuideCapture");
-    const capture = { materials: new Map(), modules: new Map(), bindings: [], programIndex: new Map() };
+    const capture = { materials: new Map(), modules: new Map(), bindings: [], programIndex: new Map(), receptionPlans: new Map() };
     const snapshot = createGGuidePublication(capture);
     const fact = { scope: "scope", value: { kind: "switch", id: "node" }, receivedAt: 1 };
     const asset = { id: "image", sources: [{ lastReceivedAt: 1 }], lastReceivedAt: 1 };
@@ -89,6 +89,8 @@ test("capture publication acknowledges only committed deltas, including arrivals
     capture.modules.set("module", Buffer.from("module"));
     capture.bindings.push({ id: "binding-one" });
     capture.programIndex.set("fact", fact);
+    const plan = { id: "plan", receivedAt: 1, windows: [] };
+    capture.receptionPlans.set("plan", plan);
     const first = snapshot();
     assert.equal(first.materials.length, 1);
     assert.equal(snapshot().materials.length, 1, "failed/uncommitted write must remain pending");
@@ -96,16 +98,19 @@ test("capture publication acknowledges only committed deltas, including arrivals
     capture.bindings.push({ id: "binding-two" });
     const newer = { ...fact, receivedAt: 2 };
     capture.programIndex.set("fact", newer);
+    const newerPlan = { ...plan, receivedAt: 2 };
+    capture.receptionPlans.set("plan", newerPlan);
     assert.equal(first.materials[0].asset.sources.length, 1, "in-flight metadata is isolated");
     first.commit();
     const second = snapshot();
     assert.equal(second.materials[0].asset.sources.length, 2);
     assert.deepEqual(second.bindings, [{ id: "binding-two" }]);
     assert.deepEqual(second.programIndex, [newer]);
+    assert.deepEqual(second.receptionPlans, [newerPlan]);
     assert.equal(second.modules.size, 0);
     second.commit();
     const empty = snapshot();
-    assert.equal(empty.materials.length + empty.bindings.length + empty.programIndex.length + empty.modules.size, 0);
+    assert.equal(empty.materials.length + empty.bindings.length + empty.programIndex.length + empty.modules.size + empty.receptionPlans.length, 0);
 });
 
 test("worker returns only committed changes and preserves prior index facts through image-only writes and reopen", async t => {
@@ -138,7 +143,7 @@ test("capture completion flushes arrivals after an in-flight publication without
     let tick, release;
     global.setInterval = fn => { tick = fn; return nativeInterval(() => {}, 100000); };
     t.after(() => { global.setInterval = nativeInterval; });
-    const capture = { materials: new Map(), modules: new Map(), bindings: [], programIndex: new Map(), seen: new Set(["one"]) };
+    const capture = { materials: new Map(), modules: new Map(), bindings: [], programIndex: new Map(), receptionPlans: new Map(), seen: new Set(["one"]) };
     const material = id => ({ data: Buffer.from(id), asset: { id, sources: [], lastReceivedAt: 1 } });
     capture.materials.set("one", material("one"));
     const writes = [];

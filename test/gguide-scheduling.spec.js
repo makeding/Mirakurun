@@ -82,6 +82,37 @@ test("passive aliases share one decoder and cooldown, preserving the actual rece
     assert.equal(value.passive.size, 1, "switching tuning aliases must not bypass the cooldown");
 });
 
+test("remote-discovered GGuide service keeps its full capture window instead of an unknown-service probe", () => {
+    const value = guide([channel("GR", "16")]);
+    _.service = { findByChannel: () => [{ serviceId: 2199, name: "Ｇガイド" }] };
+    assert.deepEqual(value.status.targets, [{ channelType: "GR", channel: "16", serviceId: 2199, durationSeconds: 1 }]);
+});
+
+test("discovery completing after a reception window acknowledges the phase captured at startup", async t => {
+    const value = guide([channel("GR", "16")]);
+    const startedAt = Date.parse("2026-10-24T15:35:00+09:00");
+    let now = startedAt;
+    t.mock.method(Date, "now", () => now);
+    const { mergeGGuideReception } = require("../lib/Mirakurun/GGuideReception");
+    let state = { receptionPlans: [], receptionProgress: [] };
+    value.store = { get reception() { return state; }, save: async (a, b, c, d, e, update) => {
+        state = mergeGGuideReception(state, update, 0);
+    } };
+    value.collect = async () => {
+        state.receptionPlans = [{ id: "live", channelType: "GR", channel: "16", serviceId: 2199,
+            receivedAt: now, windows: Array.from({ length: 24 }, (_, hour) => ({
+                preferred: hour === 18, day: 0, startMinute: hour * 60, durationMinutes: 40
+            })) }];
+        now += 9 * 60000;
+        return true;
+    };
+    await value.collectTargets(new AbortController().signal, true);
+    const completed = state.receptionProgress.find(item => item.phase !== "discovery");
+    assert.equal(completed.windowStart, Date.parse("2026-10-24T15:00:00+09:00"));
+    assert.equal(completed.completedAt, now);
+    assert.deepEqual(value.getAutomaticTargets(now + 3600000), []);
+});
+
 test("HTTP scheduled job with real retained TS uses one tuner for 22/T22", { timeout: 30000 }, async t => {
     const fs = require("node:fs");
     const path = require("node:path");
@@ -151,4 +182,31 @@ test("HTTP scheduled job with real retained TS uses one tuner for 22/T22", { tim
     const assets = await assetsResponse.json();
     assert.ok(assets.length > 10, "the retained TS must still decode and publish images");
     assert.ok(assets.every(asset => asset.sources.every(source => source.channel === "22")));
+    const persisted = await history.gguideOpen(value.store.maxBytes);
+    assert.ok(persisted.receptionPlans.length > 0, "the real decoder must learn HIP plans without retaining raw modules");
+    assert.ok(persisted.receptionPlans.every(plan => plan.channel === "22"));
+    await value.close();
+    _.job.close();
+    _.job = new Job();
+    value = _.gguide = new GGuide();
+    await value.init();
+    assert.deepEqual(value.store.reception.receptionPlans, persisted.receptionPlans, "cold GGuide startup must load SQLite plans");
+    // Exercise the automatic schedule branch through the real Job runner, not manual Run.
+    const due = value.getAutomaticTargets();
+    if (due.length) {
+        const prior = _.job.jobs.length;
+        await _.job._checkSchedule();
+        let automatic;
+        for (let i = 0; i < 100; i++) {
+            automatic = _.job.jobs.find(item => item.key === "gguide:scheduled");
+            if (automatic?.status === "finished") { break; }
+            await sleep(100);
+        }
+        assert.ok(_.job.jobs.length > prior);
+        assert.equal(automatic?.hasFailed, false, automatic?.error);
+        assert.ok(value.store.reception.receptionProgress.some(item => item.completedAt));
+        const count = _.job.jobs.length;
+        await _.job._checkSchedule();
+        assert.equal(_.job.jobs.length, count, "a completed window must not enqueue another automatic capture");
+    }
 });

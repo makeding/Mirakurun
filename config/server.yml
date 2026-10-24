@@ -15,6 +15,15 @@ port: 40772
 # Number of days to retain EPG history in SQLite.
 programHistoryRetentionDays: 365
 
+# gguideSchedule: <auto|five-field cron|empty string>
+# Default auto learns broadcast reception windows, prefers marked daily windows,
+# and uses advertised backup windows after a missed or preempted capture.
+# Plans and completion records survive restart. Unknown channels are probed once
+# per six hours (failed probes retry after one hour). Capture priority stays -1.
+# An explicit cron overrides automatic timing; an empty string disables it.
+# Manual Run in the Jobs schedule always scans the configured terrestrial sources.
+# gguideSchedule: auto
+
 # defaultTlvStreamFormat: <ts|tlv>
 # Native TLV streams remain TLV unless a client explicitly requests MPEG-TS.
 # defaultTlvStreamFormat: tlv

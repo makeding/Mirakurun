@@ -19,6 +19,7 @@ import * as apid from "../../api";
 import { Program } from "./db";
 import { rejectWhere } from "./common";
 import type { GGuideIndexFact } from "./GGuideProgramIndex";
+import type { GGuideReceptionUpdate } from "./GGuideReception";
 
 export interface HistoryMutation {
     program: Program;
@@ -36,7 +37,7 @@ export interface HistoryOptions {
     onFailure?: (error: Error) => void;
 }
 
-export interface GGuideStorageState {
+export interface GGuideStorageState extends GGuideReceptionUpdate {
     enabled?: boolean;
     assets: apid.GGuideAsset[];
     modules: string[];
@@ -56,7 +57,7 @@ export interface GGuideStorageMaterial {
     data: Buffer;
 }
 
-export interface GGuideStorageSave {
+export interface GGuideStorageSave extends GGuideReceptionUpdate {
     materials: GGuideStorageMaterial[];
     modules: [string, Buffer][];
     result?: apid.GGuideCollectionResult;

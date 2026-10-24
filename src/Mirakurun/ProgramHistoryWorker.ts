@@ -27,6 +27,7 @@ import sift from "sift";
 import { rejectWhere } from "./common";
 import { mergeGGuideIndex } from "./GGuideProgramIndex";
 import { mergeMembers } from "./GGuideStore";
+import { mergeGGuideReception } from "./GGuideReception";
 
 const DAY = 86400000;
 let database: DatabaseSync;
@@ -179,7 +180,8 @@ function gguideSave(save: GGuideStorageSave): GGuideStorageUpdate {
     return transaction(() => {
         const cutoff = Date.now() - GGUIDE_RETENTION_MS;
         const update: GGuideStorageUpdate = { cutoff, assets: [], bindings: [], modules: [], moduleReceivedAt: {},
-            programIndex: save.programIndex || [], lastCollection: save.result };
+            programIndex: save.programIndex || [], lastCollection: save.result,
+            receptionPlans: save.receptionPlans || [], receptionProgress: save.receptionProgress || [] };
         const assets = new Map<string, apid.GGuideAsset>();
         const bindings = new Map<string, apid.GGuideBinding>();
         const assetQuery = database.prepare("SELECT metadata_json FROM gguide_assets WHERE id=?");
@@ -227,11 +229,14 @@ function gguideSave(save: GGuideStorageSave): GGuideStorageUpdate {
             bindings.set(next.id, next);
         }
         // Image-only publications must not parse/rewrite the entire program index.
-        if (save.programIndex?.length || save.result) {
+        if (save.programIndex?.length || save.result || save.receptionPlans?.length || save.receptionProgress?.length) {
             const metadata = database.prepare("SELECT value FROM metadata WHERE key='gguide-state'").get();
             const state = (metadata ? JSON.parse(metadata.value as string) : {}) as GGuideStorageState;
             if (save.programIndex?.length) { state.programIndex = mergeGGuideIndex(state.programIndex || [], save.programIndex, cutoff); }
             if (save.result) { state.lastCollection = save.result; }
+            if (save.receptionPlans?.length || save.receptionProgress?.length) {
+                Object.assign(state, mergeGGuideReception(state, save, cutoff));
+            }
             putGGuideState(state);
         }
         if (gguideBytes() > save.maxBytes) { throw new QueryError("GGuide storage budget exhausted"); }
@@ -253,6 +258,7 @@ function gguidePrune(now: number): GGuideStorageState {
     database.prepare("DELETE FROM gguide_bindings WHERE last_received_at<=?").run(cutoff);
     const state = gguideState();
     state.programIndex = mergeGGuideIndex(state.programIndex || [], [], cutoff);
+    Object.assign(state, mergeGGuideReception(state, {}, cutoff));
     putGGuideState(state);
     return state;
 }

@@ -219,7 +219,7 @@ process.stdout.on("error",()=>process.exit(0));
         const schedules = await json("/job-schedules");
         const schedule = schedules.find(item => item.key === "gguide:scheduled");
         assert.equal(schedule.job.name, "HGuide Getherer");
-        assert.equal(schedule.schedule, "20 5,11,17,23 * * *");
+        assert.equal(schedule.schedule, "* * * * *");
         const dispatch = await fetch(`${base}/job-schedules/gguide%3Ascheduled/run`, { method: "PUT" });
         assert.equal(dispatch.status, 202, await dispatch.text());
         const scheduledJob = (await json("/jobs")).find(item => item.key === "gguide:scheduled" && item.status !== "finished");

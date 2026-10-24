@@ -19,6 +19,7 @@ import { decodeGGuideModule } from "./GGuideDecoder";
 import { GGuideCarousel } from "./GGuideCarousel";
 
 import { GGuideIndexFact, gguideScope } from "./GGuideProgramIndex";
+import { GGuideReceptionPlan } from "./GGuideReception";
 
 const MAX_STAGED_BYTES = 64 * 1024 * 1024;
 
@@ -30,6 +31,7 @@ export function createGGuideCapture(request: apid.GGuideCollectionRequest, paylo
     const bindings: apid.GGuideBinding[] = [];
     const seen = new Set<string>();
     const programIndex = new Map<string, GGuideIndexFact>();
+    const receptionPlans = new Map<string, GGuideReceptionPlan>();
     let stagedBytes = 0;
     const carousel = new GGuideCarousel({ serviceId: request.serviceId, onModule: module => {
         const moduleHash = digest(module.data);
@@ -40,6 +42,12 @@ export function createGGuideCapture(request: apid.GGuideCollectionRequest, paylo
         const decoded = decodeGGuideModule(module.data, context);
         const receivedAt = Date.now();
         const scope = gguideScope({ ...request, serviceId: module.serviceId });
+        for (const plan of decoded.receptionPlans) {
+            const id = `${scope}:${plan.id}`;
+            const value = { ...plan, channelType: request.channelType, channel: request.channel, serviceId: module.serviceId, receivedAt };
+            stagedBytes += Buffer.byteLength(JSON.stringify(value)) - (receptionPlans.has(id) ? Buffer.byteLength(JSON.stringify(receptionPlans.get(id))) : 0);
+            receptionPlans.set(id, value);
+        }
         for (const value of decoded.programIndex) {
             const id = JSON.stringify([scope, value.kind, value.id]);
             const fact = { scope, value, receivedAt };
@@ -83,7 +91,7 @@ export function createGGuideCapture(request: apid.GGuideCollectionRequest, paylo
         }
         if (stagedBytes > MAX_STAGED_BYTES) { throw new Error("GGuide collection memory budget exhausted"); }
     } });
-    return { materials, modules, bindings, programIndex, seen, carousel };
+    return { materials, modules, bindings, programIndex, receptionPlans, seen, carousel };
 }
 
 /** Acknowledge only a committed snapshot; reception may advance during SQLite I/O. */
@@ -91,6 +99,7 @@ export function createGGuidePublication(capture: ReturnType<typeof createGGuideC
     const publishedMaterials = new Map<string, { sources: number; receivedAt: number }>();
     const publishedModules = new Set<string>();
     const publishedFacts = new Map<string, GGuideIndexFact>();
+    const publishedPlans = new Map<string, GGuideReceptionPlan>();
     let publishedBindings = 0;
     return () => {
         const versions = new Map<string, { sources: number; receivedAt: number }>();
@@ -106,12 +115,14 @@ export function createGGuidePublication(capture: ReturnType<typeof createGGuideC
         const bindingCount = capture.bindings.length;
         const bindings = capture.bindings.slice(publishedBindings, bindingCount);
         const facts = [...capture.programIndex].filter(([id, fact]) => publishedFacts.get(id) !== fact);
+        const plans = [...capture.receptionPlans].filter(([id, plan]) => publishedPlans.get(id) !== plan);
         return {
-            materials, modules, bindings, programIndex: facts.map(([, fact]) => fact),
+            materials, modules, bindings, programIndex: facts.map(([, fact]) => fact), receptionPlans: plans.map(([, plan]) => plan),
             commit: () => {
                 for (const [id, version] of versions) { publishedMaterials.set(id, version); }
                 for (const id of modules.keys()) { publishedModules.add(id); }
                 for (const [id, fact] of facts) { publishedFacts.set(id, fact); }
+                for (const [id, plan] of plans) { publishedPlans.set(id, plan); }
                 publishedBindings = bindingCount;
             }
         };

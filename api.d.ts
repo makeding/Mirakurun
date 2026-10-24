@@ -338,6 +338,7 @@ export interface ConfigServer {
     programGCJobSchedule?: string;
     programHistoryRetentionDays?: number;
     gguideDurationSeconds?: number;
+    /** Default auto follows broadcast reception plans; cron overrides timing; empty disables automatic collection. */
     gguideSchedule?: string;
     gguidePassive?: boolean;
     gguidePreserveModules?: boolean;

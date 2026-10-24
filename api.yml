@@ -708,8 +708,8 @@ definitions:
         default: 1800
       gguideSchedule:
         type: string
-        default: '20 5,11,17,23 * * *'
-        description: Five-field cron in server timezone; empty disables scheduled acquisition.
+        default: auto
+        description: Auto follows broadcast reception plans with bounded discovery and recovery; a five-field cron overrides automatic timing in server timezone; empty disables scheduled acquisition.
       gguidePassive:
         type: boolean
         default: true
