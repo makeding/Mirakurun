@@ -19,7 +19,7 @@ require.cache[statusPath] = {
 
 const TLVDecoder = require("../lib/Mirakurun/TLVDecoder").default;
 
-test("TLVDecoder leaves raw TLV untouched when decode=0", () => {
+test("TLVDecoder leaves raw TLV bytes untouched when decode=0", async () => {
     const output = new PassThrough();
     const input = TLVDecoder.create({
         output,
@@ -27,7 +27,13 @@ test("TLVDecoder leaves raw TLV untouched when decode=0", () => {
         tlvDecoder: "/definitely/not/a-decoder",
         disableDecoder: true
     });
-    assert.equal(input, output);
+    const chunks = [];
+    output.on("data", chunk => chunks.push(chunk));
+    const ended = once(output, "end");
+    input.end(Buffer.from("raw TLV"));
+    await ended;
+    assert.equal(Buffer.concat(chunks).toString(), "raw TLV");
+    assert.equal(input._process, undefined);
     output.destroy();
 });
 

@@ -637,6 +637,7 @@ export class Tuner {
                 // startup attempts close their own sink without ending the consumer.
                 const output = dest ? new PassThrough({ highWaterMark: 1024 * 1024 }) : undefined;
                 const tsFilter = new StreamFilter({
+                    requestId: user.id,
                     output,
                     decoder: device.decoder,
                     tlvDecoder: device.config.tlvDecoder,

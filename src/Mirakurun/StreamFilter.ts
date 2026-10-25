@@ -5,6 +5,7 @@ import _ from "./_";
 import { OutputFormat, StreamInfo, isValidTsmfGroupId } from "./common";
 import ChannelItem from "./ChannelItem";
 import TLVDecoder from "./TLVDecoder";
+import { streamFailures, streamProtection, StreamStageError } from "./StreamFailure";
 import TLVFilter from "./TLVFilter";
 import TSDecoder from "./TSDecoder";
 import TSFilter from "./TSFilter";
@@ -45,6 +46,7 @@ interface DetectionResult {
 }
 
 export interface StreamFilterOptions {
+    readonly requestId?: string;
     readonly output?: stream.Writable;
     readonly decoder?: string;         // TS→TS decoder (arib-b25-stream-test)
     readonly tlvToTsDecoder?: string;  // TLV→TS decoder (dantto4k)
@@ -69,6 +71,9 @@ export default class StreamFilter extends EventEmitter {
     streamInfo: StreamInfo = {};
 
     private _closed = false;
+    private _lastInputAt = 0;
+    private _inputBytes = 0;
+    private _sourceTimer: NodeJS.Timeout;
     private _detected = false;
     private _format: StreamFormat | null = null;
     private _isTsmf = false;
@@ -138,6 +143,8 @@ export default class StreamFilter extends EventEmitter {
             return;
         }
 
+        this._lastInputAt = Date.now();
+        this._inputBytes += chunk.length;
         if (this._activePipeline) {
             this._activePipeline.write(chunk);
             return;
@@ -163,6 +170,7 @@ export default class StreamFilter extends EventEmitter {
             return;
         }
         this._closed = true;
+        clearInterval(this._sourceTimer);
 
         if (this._relStreams.length > 0) {
             if (this._aggregationTimer) {
@@ -266,6 +274,16 @@ export default class StreamFilter extends EventEmitter {
         });
     }
 
+    private _failStream(error: Error): void {
+        if (this._streamError) { return; }
+        this._streamError = error;
+        streamFailures.add({ requestId: this._options.requestId,
+            channel: `${this._options.channel.type}/${this._options.channel.channel}`,
+            serviceId: this._options.serviceId }, error);
+        this.emit("failure", error);
+        this.close();
+    }
+
     private _createTlvFilter(): TLVFilter | null {
         const opts = this._options;
         const wanted: OutputFormat = opts.outputFormat ?? opts.legacyTlvOutputFormat ?? _.config.server.defaultTlvStreamFormat ?? "tlv";
@@ -276,19 +294,26 @@ export default class StreamFilter extends EventEmitter {
             return null;
         }
         this._setOutputFormat(wanted);
+        if (opts.output) {
+            const timeout = streamProtection(_.config.server.tlvStreamProtection).sourceTimeoutMs;
+            this._sourceTimer = setInterval(() => {
+                if (Date.now() - this._lastInputAt >= timeout) {
+                    this._failStream(new StreamStageError({ stage: "source", code: "SOURCE_STALLED",
+                        reason: "The broadcast source stopped sending data.", inputBytes: this._inputBytes,
+                        outputBytes: 0, lastInputAt: this._lastInputAt, stderr: "" }));
+                }
+            }, Math.max(10, Math.min(1000, timeout / 4)));
+            this._sourceTimer.unref();
+        }
         return new TLVFilter({
             output: TLVDecoder.create({
+                protection: _.config.server.tlvStreamProtection,
                 output: opts.output,
                 outputFormat: wanted,
                 tlvDecoder: opts.tlvDecoder,
                 tlvToTsDecoder: opts.tlvToTsDecoder,
                 disableDecoder: opts.disableDecoder,
-                onError: error => {
-                    if (this._streamError) { return; }
-                    this._streamError = error;
-                    this.emit("failure", error);
-                    this.close();
-                }
+                onError: error => this._failStream(error)
             }),
             passthrough: opts.disableDecoder === true && opts.eventId === undefined,
             networkId: opts.networkId,

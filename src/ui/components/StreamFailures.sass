@@ -1,0 +1,145 @@
+@use "~@blueprintjs/colors/lib/scss/colors"
+
+.stream-failures
+  display: flex
+  flex-direction: column
+  gap: 10px
+
+.stream-failures-heading
+  display: flex
+  align-items: center
+  justify-content: space-between
+  gap: 12px
+
+  h3,
+  p
+    margin: 0
+
+  h3
+    font-size: 16px
+
+  p
+    margin-top: 3px
+    color: colors.$gray2
+    font-size: 12px
+
+    .bp5-dark &
+      color: colors.$gray4
+
+.stream-failures-pane
+  height: 24rem
+  overflow-y: auto
+  overflow-x: hidden
+  border: 1px solid colors.$light-gray2
+  border-radius: 4px
+  background: rgba(colors.$light-gray5, 0.35)
+
+  .bp5-dark &
+    border-color: colors.$dark-gray3
+    background: rgba(colors.$black, 0.25)
+
+.stream-failures-state
+  height: 100%
+  padding: 24px
+
+.stream-failures-error
+  display: flex
+  flex-wrap: wrap
+  align-items: center
+  gap: 6px 10px
+  margin: 10px
+
+.stream-failures-list
+  display: flex
+  flex-direction: column
+  gap: 8px
+  padding: 10px
+
+.stream-failure
+  padding: 10px
+  border: 1px solid colors.$light-gray2
+  border-radius: 4px
+  background: colors.$white
+  overflow-wrap: anywhere
+
+  .bp5-dark &
+    border-color: colors.$dark-gray3
+    background: colors.$dark-gray4
+
+  header
+    display: flex
+    align-items: flex-start
+    justify-content: space-between
+    gap: 8px
+
+    > div
+      display: flex
+      flex-direction: column
+      min-width: 0
+
+    strong
+      overflow-wrap: anywhere
+
+    time
+      margin-top: 2px
+      color: colors.$gray2
+      font-size: 12px
+
+      .bp5-dark &
+        color: colors.$gray4
+
+  .stream-failure-reason
+    margin: 8px 0
+    font-weight: 600
+
+  dl
+    display: grid
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr))
+    gap: 5px 12px
+    margin: 0
+
+    div
+      min-width: 0
+
+    dt
+      color: colors.$gray2
+      font-size: 11px
+
+      .bp5-dark &
+        color: colors.$gray4
+
+    dd
+      margin: 1px 0 0
+      font-size: 12px
+      overflow-wrap: anywhere
+
+  details
+    margin-top: 8px
+
+    summary
+      cursor: pointer
+
+    pre
+      max-width: 100%
+      margin: 6px 0 0
+      padding: 8px
+      overflow-x: auto
+      white-space: pre-wrap
+      overflow-wrap: anywhere
+      border-radius: 3px
+      background: colors.$light-gray5
+      font-size: 11px
+
+      .bp5-dark &
+        background: colors.$dark-gray3
+
+@media (max-width: 480px)
+  .stream-failures-heading
+    align-items: flex-start
+    flex-direction: column
+
+  .stream-failures-heading > .bp5-button
+    align-self: flex-end
+
+  .stream-failure header
+    flex-direction: column

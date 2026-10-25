@@ -39,6 +39,7 @@ import { Service, Status, StreamInfo, TunerDevice } from "../../../api.d";
 import { formatStreamQuality } from "../modules/stream-quality";
 
 import "./HomeView.sass";
+import { StreamFailures } from "../components/StreamFailures";
 
 const summarizeStreamInfo = (streamInfo: StreamInfo): string => {
     if (!streamInfo) {
@@ -577,6 +578,7 @@ export const HomeView: React.FC = () => {
                             <TunersSection tuners={tuners} />
                         </div>
                     </Section>
+                    <StreamFailures />
                 </div>
             </div>
         </div>

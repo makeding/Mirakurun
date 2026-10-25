@@ -27,3 +27,12 @@ programHistoryRetentionDays: 365
 # defaultTlvStreamFormat: <ts|tlv>
 # Native TLV streams remain TLV unless a client explicitly requests MPEG-TS.
 # defaultTlvStreamFormat: tlv
+
+# Per-request TLV protection; omitted values use these defaults (milliseconds).
+# tlvStreamProtection:
+#   maxBufferBytes: 33554432
+#   startupTimeoutMs: 10000
+#   sourceTimeoutMs: 30000
+#   stallTimeoutMs: 15000
+#   outputTimeoutMs: 30000
+#   drainTimeoutMs: 10000

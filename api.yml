@@ -692,6 +692,36 @@ definitions:
 
   # config --------------------------------------------------------------------
 
+  StreamFailure:
+    type: object
+    required: [id, at, channel, stage, code, reason, inputBytes, outputBytes, stderr]
+    properties:
+      id: { type: string }
+      at: { type: integer }
+      requestId: { type: string }
+      channel: { type: string }
+      serviceId: { type: integer }
+      stage: { type: string }
+      code: { type: string }
+      reason: { type: string }
+      inputBytes: { type: integer }
+      outputBytes: { type: integer }
+      lastInputAt: { type: integer }
+      lastOutputAt: { type: integer }
+      exitCode: { type: integer }
+      signal: { type: string }
+      stderr: { type: string }
+
+  TLVStreamProtection:
+    type: object
+    properties:
+      maxBufferBytes: { type: integer, minimum: 1 }
+      startupTimeoutMs: { type: integer, minimum: 1 }
+      sourceTimeoutMs: { type: integer, minimum: 1 }
+      stallTimeoutMs: { type: integer, minimum: 1 }
+      outputTimeoutMs: { type: integer, minimum: 1 }
+      drainTimeoutMs: { type: integer, minimum: 1 }
+
   ConfigServer:
     type: object
     properties:
@@ -755,6 +785,8 @@ definitions:
         type: integer
       logoDataInterval:
         type: integer
+      tlvStreamProtection:
+        $ref: "#/definitions/TLVStreamProtection"
       defaultTlvStreamFormat:
         $ref: '#/definitions/StreamFormat'
       tunerHandoff:

@@ -338,7 +338,35 @@ export type EventResource = "program" | "service" | "tuner" | "job" | "job_sched
 
 export type EventType = "create" | "update" | "remove";
 
+export interface TLVStreamProtection {
+    maxBufferBytes?: number;
+    startupTimeoutMs?: number;
+    sourceTimeoutMs?: number;
+    stallTimeoutMs?: number;
+    outputTimeoutMs?: number;
+    drainTimeoutMs?: number;
+}
+
+export interface StreamFailure {
+    id: string;
+    at: number;
+    requestId?: string;
+    channel: string;
+    serviceId?: number;
+    stage: string;
+    code: string;
+    reason: string;
+    inputBytes: number;
+    outputBytes: number;
+    lastInputAt?: number;
+    lastOutputAt?: number;
+    exitCode?: number;
+    signal?: string;
+    stderr: string;
+}
+
 export interface ConfigServer {
+    tlvStreamProtection?: TLVStreamProtection;
     path?: string;
     port?: number;
     hostname?: string;
