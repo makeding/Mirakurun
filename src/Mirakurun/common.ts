@@ -50,10 +50,26 @@ interface StreamSetting {
 }
 
 export interface StreamInfo {
-    [PID: string]: {
-        packet: number;
-        drop: number;
-    };
+    [PID: string]: StreamInfoEntry;
+}
+
+export interface StreamInfoEntry {
+    packet: number;
+    // Kept for clients that predate measurement metadata.  For TLV, this is
+    // only the number of sequence gaps proven by an MMTP packet sequence.
+    drop: number;
+    measurement?: StreamMeasurement;
+}
+
+export interface StreamMeasurement {
+    method: "mmtp-packet-sequence-estimate";
+    measuredPackets: number;
+    comparedPackets: number;
+    baselinePackets: number;
+    unavailablePackets: number;
+    duplicatePackets: number;
+    reorderedPackets: number;
+    resyncPackets: number;
 }
 
 export const channelTypes: apid.ChannelType[] = ["GR", "GR-ALT", "BS", "CS", "SKY", "BS4K"];

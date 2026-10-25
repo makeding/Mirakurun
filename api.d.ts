@@ -271,10 +271,24 @@ interface StreamSetting {
 }
 
 export interface StreamInfo {
-    [PID: string]: {
-        packet: number;
-        drop: number;
-    }
+    [PID: string]: StreamInfoEntry;
+}
+
+export interface StreamInfoEntry {
+    packet: number;
+    drop: number;
+    measurement?: StreamMeasurement;
+}
+
+export interface StreamMeasurement {
+    method: "mmtp-packet-sequence-estimate";
+    measuredPackets: number;
+    comparedPackets: number;
+    baselinePackets: number;
+    unavailablePackets: number;
+    duplicatePackets: number;
+    reorderedPackets: number;
+    resyncPackets: number;
 }
 
 export interface TunerProcess {

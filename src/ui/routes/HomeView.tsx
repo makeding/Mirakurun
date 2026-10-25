@@ -36,6 +36,7 @@ import {
 import { state } from "../modules/state";
 import * as ui from "../modules/ui";
 import { Service, Status, StreamInfo, TunerDevice } from "../../../api.d";
+import { formatStreamQuality } from "../modules/stream-quality";
 
 import "./HomeView.sass";
 
@@ -43,15 +44,7 @@ const summarizeStreamInfo = (streamInfo: StreamInfo): string => {
     if (!streamInfo) {
         return "-";
     }
-
-    let packets = 0;
-    let drops = 0;
-    for (const pid in streamInfo) {
-        packets += streamInfo[pid].packet;
-        drops += streamInfo[pid].drop;
-    }
-
-    return `Dropped Pkts: ${drops} / ${packets}`;
+    return formatStreamQuality(streamInfo);
 };
 
 const isEmptyStreamInfo = (streamInfo: StreamInfo): boolean => {
@@ -220,9 +213,10 @@ const StreamInfoTable: React.FC<{
         <table className="bp5-html-table bp5-html-table-striped bp5-html-table-condensed stream-info-table">
             <thead>
                 <tr>
-                    <th>PID</th>
+                    <th>Stream</th>
                     <th className="numeric">Packets</th>
-                    <th className="numeric">Drops</th>
+                    <th className="numeric">Drops / estimated MMTP gaps</th>
+                    <th className="numeric">Measurement</th>
                 </tr>
             </thead>
             <tbody>
@@ -230,7 +224,14 @@ const StreamInfoTable: React.FC<{
                     <tr key={pid}>
                         <td>{pid}</td>
                         <td className="numeric">{data.packet.toLocaleString()}</td>
-                        <td className={`numeric${data.drop > 0 ? " color-danger" : ""}`}>{data.drop.toLocaleString()}</td>
+                        <td className={`numeric${data.drop > 0 ? " color-danger" : ""}`}>{data.measurement && data.measurement.comparedPackets === 0 ? "—" : data.drop.toLocaleString()}</td>
+                        <td className="numeric">
+                            {data.measurement ?
+                                data.measurement.comparedPackets > 0 ?
+                                    `${data.measurement.comparedPackets.toLocaleString()} compared` :
+                                    `Unknown (${data.measurement.unavailablePackets.toLocaleString()} unmeasured)` :
+                                "Legacy counter"}
+                        </td>
                     </tr>
                 ))}
             </tbody>

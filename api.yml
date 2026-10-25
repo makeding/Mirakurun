@@ -537,6 +537,35 @@ definitions:
               type: integer
             drop:
               type: integer
+            measurement:
+              type: object
+              required:
+                - method
+                - measuredPackets
+                - comparedPackets
+                - baselinePackets
+                - unavailablePackets
+                - duplicatePackets
+                - reorderedPackets
+              properties:
+                method:
+                  type: string
+                  enum:
+                    - mmtp-packet-sequence-estimate
+                measuredPackets:
+                  type: integer
+                comparedPackets:
+                  type: integer
+                baselinePackets:
+                  type: integer
+                unavailablePackets:
+                  type: integer
+                duplicatePackets:
+                  type: integer
+                reorderedPackets:
+                  type: integer
+                resyncPackets:
+                  type: integer
 
   TunerProcess:
     type: object

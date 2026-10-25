@@ -17,7 +17,7 @@
 */
 import { Writable } from "stream";
 import EventEmitter = require("eventemitter3");
-import { StreamInfo } from "./common";
+import { StreamInfo, StreamInfoEntry } from "./common";
 import * as log from "./log";
 import status from "./status";
 import _ from "./_";
@@ -41,6 +41,7 @@ import { TLVNetworkInformationTable } from "arib-mmt-tlv-ts/tlv-si.js";
 import MHEPG from "./MHEPG";
 import { MH_LOGO_TRANSMISSION_TYPE_DIRECT } from "arib-mmt-tlv-ts/mmt-si-descriptor.js";
 import { mjdBCDToUnixEpoch } from "arib-mmt-tlv-ts/utils.js";
+import TLVStreamQuality from "./TLVStreamQuality";
 
 const activeEPG = new Map<ChannelItem, number>();
 
@@ -103,6 +104,7 @@ export default class TLVFilter extends EventEmitter {
     // stream info
     private _trackStreamInfo = false;
     private _tlvParseBuf: Buffer = null;
+    private _streamQuality = new TLVStreamQuality();
 
     // state
     private _closed = false;
@@ -252,10 +254,25 @@ export default class TLVFilter extends EventEmitter {
                 return;
             }
             const key = String(type);
-            if (this.streamInfo[key] === undefined) {
-                this.streamInfo[key] = { packet: 0, drop: 0 };
+            let entry: StreamInfoEntry = this.streamInfo[key];
+            if (entry === undefined) {
+                entry = this.streamInfo[key] = {
+                    packet: 0,
+                    drop: 0,
+                    measurement: {
+                        method: "mmtp-packet-sequence-estimate",
+                        measuredPackets: 0,
+                        comparedPackets: 0,
+                        baselinePackets: 0,
+                        unavailablePackets: 0,
+                        duplicatePackets: 0,
+                        reorderedPackets: 0,
+                        resyncPackets: 0
+                    }
+                };
             }
-            ++this.streamInfo[key].packet;
+            ++entry.packet;
+            this._streamQuality.observe(buf.subarray(pos, pktEnd), entry);
             pos = pktEnd;
         }
         if (pos < buf.length) {
