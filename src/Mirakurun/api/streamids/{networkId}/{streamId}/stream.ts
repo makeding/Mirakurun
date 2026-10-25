@@ -77,7 +77,7 @@ get.apiDoc = {
         200: { description: "OK", headers: { "X-Mirakurun-Tuner-User-ID": { type: "string" } } },
         404: { description: "Not Found" },
         406: { description: "Requested Stream Format Unavailable" },
-        503: { description: "Tuner Resource Unavailable" },
+        503: { description: "Tuner Resource Unavailable or Stream Decoder Failed" },
         default: { description: "Unexpected Error" }
     }
 };

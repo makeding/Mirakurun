@@ -74,6 +74,7 @@ export default class StreamFilter extends EventEmitter {
     private _isTsmf = false;
     private _outputFormat: OutputFormat | null = null;
     private _unavailableReason: string | undefined;
+    private _streamError: Error | undefined;
     private _options: StreamFilterOptions;
     private _innerFilter: TSFilter | TLVFilter = null;
     private _tsmfFilter: TSMFFilter = null;
@@ -114,6 +115,10 @@ export default class StreamFilter extends EventEmitter {
 
     get unavailableReason(): string | undefined {
         return this._unavailableReason;
+    }
+
+    get streamError(): Error | undefined {
+        return this._streamError;
     }
 
     get tsmfFilter(): TSMFFilter | null {
@@ -277,7 +282,13 @@ export default class StreamFilter extends EventEmitter {
                 outputFormat: wanted,
                 tlvDecoder: opts.tlvDecoder,
                 tlvToTsDecoder: opts.tlvToTsDecoder,
-                disableDecoder: opts.disableDecoder
+                disableDecoder: opts.disableDecoder,
+                onError: error => {
+                    if (this._streamError) { return; }
+                    this._streamError = error;
+                    this.emit("failure", error);
+                    this.close();
+                }
             }),
             passthrough: opts.disableDecoder === true && opts.eventId === undefined,
             networkId: opts.networkId,

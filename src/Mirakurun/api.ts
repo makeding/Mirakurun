@@ -31,10 +31,18 @@ export function streamContentType(format: OutputFormat | undefined): string {
 export interface StreamSink {
     readonly outputFormat?: OutputFormat | null;
     readonly unavailableReason?: string;
+    readonly streamError?: globalThis.Error;
     once(event: string, listener: (...args: any[]) => void): unknown;
 }
 
 export function respondStream(res: express.Response, filter: StreamSink, userId: string): void {
+    const fail = () => {
+        if (res.destroyed || res.writableEnded) { return; }
+        if (res.headersSent) { res.destroy();
+        } else { responseError(res, 503, "Stream Decoder Failed"); }
+    };
+    if (filter.streamError) { fail(); return; }
+    filter.once("failure", fail);
     const start = (format: OutputFormat) => {
         if (res.headersSent) {
             return;

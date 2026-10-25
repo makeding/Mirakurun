@@ -25,6 +25,7 @@ interface TLVDecoderOptions {
     readonly output: stream.Writable;
     readonly command: string;
     readonly startupTimeout?: number;
+    readonly onError?: (error: Error) => void;
 }
 
 /** The independent B61 and TLV-to-TS stages for a TLV input stream. */
@@ -34,6 +35,7 @@ export interface TLVDecoderFactoryOptions {
     readonly tlvDecoder?: string;
     readonly tlvToTsDecoder?: string;
     readonly disableDecoder?: boolean;
+    readonly onError?: (error: Error) => void;
 }
 
 const DEFAULT_STARTUP_TIMEOUT = 10000;
@@ -56,16 +58,16 @@ export default class TLVDecoder extends stream.Writable {
 
         if (opts.outputFormat === "tlv") {
             return !opts.disableDecoder && opts.tlvDecoder
-                ? new TLVDecoder({ output: opts.output, command: opts.tlvDecoder })
+                ? new TLVDecoder({ output: opts.output, command: opts.tlvDecoder, onError: opts.onError })
                 : opts.output;
         }
 
         let input: stream.Writable = opts.output;
         if (opts.tlvToTsDecoder) {
-            input = new TLVDecoder({ output: input, command: opts.tlvToTsDecoder });
+            input = new TLVDecoder({ output: input, command: opts.tlvToTsDecoder, onError: opts.onError });
         }
         if (!opts.disableDecoder && opts.tlvDecoder) {
-            input = new TLVDecoder({ output: input, command: opts.tlvDecoder });
+            input = new TLVDecoder({ output: input, command: opts.tlvDecoder, onError: opts.onError });
         }
         return input;
     }
@@ -77,130 +79,152 @@ export default class TLVDecoder extends stream.Writable {
     private _process: child_process.ChildProcess | undefined;
     private _readable: stream.Readable | undefined;
     private _writable: stream.Writable | undefined;
-    private _isNew = false;
     private _timeout: NodeJS.Timeout | undefined;
     private _closed = false;
-    private _deadCount = 0;
+    private _inputStarted = false;
+    private _outputStarted = false;
+    private _inputEnded = false;
+    private _inputFinished = false;
+    private _processClosed = false;
+    private _stdoutEnded = false;
+    private _pendingOutputWrites = 0;
+    private readonly _onError?: (error: Error) => void;
+    private readonly _onOutputClose: () => void;
+    private readonly _onOutputError: (error: Error) => void;
 
     constructor(opts: TLVDecoderOptions) {
-        // `Writable` otherwise auto-destroys on finalization and emits close
-        // before the child has drained stdout, which would kill the decoder.
+        // Input finish precedes child stdout drain. Keep ownership until the
+        // process and its output have both completed, or the client cancels.
         super({ autoDestroy: false });
         this._command = opts.command;
         this._startupTimeout = opts.startupTimeout || DEFAULT_STARTUP_TIMEOUT;
+        this._onError = opts.onError;
+        this._onOutputClose = () => this._cancel();
+        this._onOutputError = error => this._fail(error);
         this._output = opts.output;
-        this._output.once("finish", this._close.bind(this));
-        this._output.once("close", this._close.bind(this));
+        this._output.once("finish", this._onOutputClose);
+        this._output.once("close", this._onOutputClose);
+        this._output.once("error", this._onOutputError);
         Object.defineProperty(this, "writableLength", { get: () => opts.output.writableLength });
         Object.defineProperty(this, "writableHighWaterMark", { get: () => opts.output.writableHighWaterMark });
-        this.once("close", this._close.bind(this));
+        this.once("close", () => this._cancel());
+        this.on("error", error => this._fail(error));
         ++status.streamCount.decoder;
         log.info("TLVDecoder#%d has created (command=%s)", this._id, this._command);
         this._spawn();
     }
 
     _write(chunk: Buffer, _encoding: BufferEncoding, callback: (error?: Error | null) => void): void {
-        if (!this._writable) {
-            callback();
-            return;
+        if (!this._writable || this._closed) { callback(); return; }
+        if (!this._inputStarted) {
+            this._inputStarted = true;
+            if (!this._outputStarted) {
+                this._timeout = setTimeout(() => {
+                    this._fail(new Error("TLV decoder produced no output before startup timeout"));
+                }, this._startupTimeout);
+            }
         }
-        if (this._isNew && this._process) {
-            this._isNew = false;
-            this._timeout = setTimeout(() => {
-                log.warn("TLVDecoder#%d process will force killed because no response", this._id);
-                this._dead();
-            }, this._startupTimeout);
-        }
-        this._writable.write(chunk, callback);
+        this._writable.write(chunk, error => callback(this._closed ? undefined : error));
     }
 
     _final(callback: (error?: Error | null) => void): void {
-        if (!this._writable || this._closed) {
+        this._inputEnded = true;
+        if (!this._writable || this._closed) { callback(); return; }
+        this._writable.end((error?: Error) => {
+            // Cancellation can destroy stdin after end() but before its callback.
+            // The request has already been cancelled/failed; do not emit a second
+            // Writable error from that deliberately interrupted finalization.
+            if (this._closed) { callback(); return; }
+            if (error) { callback(error); return; }
+            this._inputFinished = true;
             callback();
-            return;
-        }
-        this._writable.end(callback);
+            this._finish();
+        });
     }
 
     private _spawn(): void {
-        if (this._closed || this._process) { return; }
-        if (this._deadCount > 0) {
-            ++status.errorCount.decoderRespawn;
-            log.warn("TLVDecoder#%d respawning because dead (count=%d)", this._id, this._deadCount);
-        }
         const parsed = common.parseCommandForSpawn(this._command);
         const proc = this._process = child_process.spawn(parsed.command, parsed.args);
-        proc.once("error", err => {
-            if (this._process !== proc) { return; }
-            log.error("TLVDecoder#%d process error: %s", this._id, err.message);
-            this._dead();
-        });
+        proc.once("error", error => this._fail(error));
         proc.once("close", (code, signal) => {
-            if (this._process !== proc) { return; }
-            log.info("TLVDecoder#%d process closed with exit code=%d signal=%s (pid=%d)", this._id, code, signal, proc.pid);
-            this._dead();
+            if (this._closed) { return; }
+            log.info("TLVDecoder#%d process closed with exit code=%s signal=%s (pid=%d)", this._id, code, signal, proc.pid);
+            if (code !== 0 || signal || !this._inputEnded) {
+                this._fail(new Error(`TLV decoder exited unexpectedly (code=${code}, signal=${signal})`));
+                return;
+            }
+            this._processClosed = true;
+            this._finish();
         });
         proc.stderr.pipe(process.stderr);
+        proc.stdin.on("error", error => this._fail(error));
+        proc.stdout.on("error", error => this._fail(error));
         proc.stdout.once("data", () => {
-            if (this._timeout) { clearTimeout(this._timeout); }
+            this._outputStarted = true;
+            clearTimeout(this._timeout);
+            this._timeout = undefined;
         });
-        let stdoutEnded = false;
-        let pendingOutputWrites = 0;
-        const closeWhenFlushed = () => {
-            if (stdoutEnded && pendingOutputWrites === 0) {
-                this._close();
-            }
-        };
         proc.stdout.on("data", chunk => {
             const output = this._output;
-            if (!output) { return; }
-            ++pendingOutputWrites;
-            output.write(chunk, () => {
-                --pendingOutputWrites;
-                closeWhenFlushed();
+            if (!output || this._closed) { return; }
+            ++this._pendingOutputWrites;
+            output.write(chunk, error => {
+                --this._pendingOutputWrites;
+                if (error) { this._fail(error); return; }
+                this._finish();
             });
         });
         proc.stdout.once("end", () => {
-            stdoutEnded = true;
-            closeWhenFlushed();
+            this._stdoutEnded = true;
+            this._finish();
         });
         this._readable = proc.stdout;
         this._writable = proc.stdin;
-        this._isNew = true;
         log.info("TLVDecoder#%d spawned by command `%s` (pid=%d)", this._id, this._command, proc.pid);
     }
 
-    private _dead(): void {
-        if (this._closed) { return; }
-        ++this._deadCount;
-        this._kill();
-        if (this._deadCount > 3) {
-            const error = new Error(`TLV decoder unavailable: ${this._command}`);
-            log.error("TLVDecoder#%d %s", this._id, error.message);
-            this.destroy(error);
-            this._output?.destroy(error);
-            return;
-        }
-        setTimeout(() => this._spawn(), 1500);
+    private _finish(): void {
+        if (this._closed || !this._inputFinished || !this._processClosed ||
+            !this._stdoutEnded || this._pendingOutputWrites !== 0) { return; }
+        const output = this._output;
+        this._stop();
+        if (output && !output.destroyed && !output.writableEnded) { output.end(); }
     }
 
-    private _kill(): void {
-        if (this._timeout) { clearTimeout(this._timeout); this._timeout = undefined; }
-        this._process?.kill("SIGKILL");
+    private _fail(error: Error): void {
+        if (this._closed) { return; }
+        const output = this._output;
+        log.error("TLVDecoder#%d failed: %s (command=%s)", this._id, error.message, this._command);
+        this._stop();
+        // The stream owner sends HTTP 503 before headers, or aborts an already
+        // streaming response. Tear down chained stages without ending HTTP as OK.
+        this._onError?.(error);
+        if (output instanceof TLVDecoder || !this._onError) { output?.destroy(); }
+    }
+
+    private _cancel(): void {
+        if (this._closed) { return; }
+        const output = this._output;
+        this._stop();
+        if (output && !output.destroyed && !output.writableFinished &&
+            (output instanceof TLVDecoder || !this._onError)) { output.destroy(); }
+    }
+
+    private _stop(): void {
+        this._closed = true;
+        clearTimeout(this._timeout);
+        this._output?.removeListener("finish", this._onOutputClose);
+        this._output?.removeListener("close", this._onOutputClose);
+        this._output?.removeListener("error", this._onOutputError);
+        this._output = undefined;
+        if (!this._processClosed) { this._process?.kill("SIGKILL"); }
         this._process = undefined;
         this._readable?.destroy();
         this._readable = undefined;
         this._writable?.destroy();
         this._writable = undefined;
-    }
-
-    private _close(): void {
-        if (this._closed) { return; }
-        this._closed = true;
-        this._kill();
-        if (this._output && !this._output.writableEnded) { this._output.end(); }
-        this._output = undefined;
         --status.streamCount.decoder;
+        this.destroy();
         log.info("TLVDecoder#%d has closed (command=%s)", this._id, this._command);
     }
 }

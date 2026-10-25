@@ -159,7 +159,7 @@ get.apiDoc = {
             description: "Requested Stream Format Unavailable"
         },
         503: {
-            description: "Tuner Resource Unavailable"
+            description: "Tuner Resource Unavailable or Stream Decoder Failed"
         },
         default: {
             description: "Unexpected Error"
