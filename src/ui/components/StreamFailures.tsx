@@ -15,7 +15,7 @@
 */
 import * as React from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Button, Callout, NonIdealState, Spinner, Tag } from "@blueprintjs/core";
+import { Button, Callout, Icon, Spinner, Tag } from "@blueprintjs/core";
 import { DateTime } from "luxon";
 import { StreamFailure } from "../../../api.d";
 
@@ -47,6 +47,8 @@ function failureTitle(failure: StreamFailure): string {
 
 export const StreamFailures: React.FC = () => {
     const loading = useRef(false);
+    const refreshButton = useRef<HTMLButtonElement>(null);
+    const retryButton = useRef<HTMLButtonElement>(null);
     const [failures, setFailures] = useState<StreamFailure[] | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [refreshing, setRefreshing] = useState(false);
@@ -63,6 +65,9 @@ export const StreamFailures: React.FC = () => {
             const next = await response.json() as StreamFailure[];
             if (!Array.isArray(next)) {
                 throw new Error("応答形式が不正です");
+            }
+            if (document.activeElement === retryButton.current) {
+                refreshButton.current?.focus();
             }
             setFailures(next);
             setError(null);
@@ -85,21 +90,24 @@ export const StreamFailures: React.FC = () => {
     return (
         <section className="stream-failures" aria-live="polite">
             <div className="stream-failures-heading">
-                <div>
-                    <h3>最近のストリーム失敗</h3>
-                    <p>信号と接続を確認して、再生をやり直してください。</p>
-                </div>
-                <Button minimal icon="refresh" text="更新" loading={refreshing} onClick={() => void load(true)} />
+                <h3>最近のストリーム失敗</h3>
+                <Button ref={refreshButton} small minimal icon={refreshing ? <Spinner size={16} /> : "refresh"} text="更新"
+                    aria-busy={refreshing} aria-disabled={refreshing} onClick={() => void load(true)} />
             </div>
             <div className="stream-failures-pane">
                 {error && <Callout className="stream-failures-error" intent="danger" icon="error">
                     <span>更新に失敗しました: {error}</span>
-                    <Button minimal intent="danger" icon="refresh" text="再試行" disabled={refreshing} onClick={() => void load(true)} />
-                    {failures !== null && <span>前回取得した結果を表示しています。</span>}
+                    <Button ref={retryButton} minimal intent="danger" icon="refresh" text="再試行" aria-disabled={refreshing} onClick={() => void load(true)} />
+                    <span>{failures === null ? "接続を確認して、もう一度更新してください。" : "前回取得した結果を表示しています。"}</span>
                 </Callout>}
-                {initialLoading && <NonIdealState className="stream-failures-state" icon={<Spinner />} title="失敗履歴を読み込んでいます" />}
-                {failures === null && error && <NonIdealState className="stream-failures-state" icon="error" title="失敗履歴を取得できませんでした" description="接続を確認して、もう一度更新してください。" />}
-                {failures !== null && failures.length === 0 && <NonIdealState className="stream-failures-state" icon="tick-circle" title="最近の失敗はありません" />}
+                {initialLoading && <div className="stream-failures-state">
+                    <Spinner size={16} />
+                    <span>失敗履歴を読み込んでいます</span>
+                </div>}
+                {failures !== null && failures.length === 0 && <div className="stream-failures-state">
+                    <Icon icon="tick-circle" size={16} />
+                    <span>最近の失敗はありません</span>
+                </div>}
                 {failures && failures.length > 0 && <div className="stream-failures-list">
                     {failures.map(failure => <FailureItem key={failure.id} failure={failure} />)}
                 </div>}

@@ -3,7 +3,7 @@
 .stream-failures
   display: flex
   flex-direction: column
-  gap: 10px
+  gap: 6px
 
 .stream-failures-heading
   display: flex
@@ -11,25 +11,11 @@
   justify-content: space-between
   gap: 12px
 
-  h3,
-  p
-    margin: 0
-
   h3
-    font-size: 16px
-
-  p
-    margin-top: 3px
-    color: colors.$gray2
-    font-size: 12px
-
-    .bp5-dark &
-      color: colors.$gray4
+    margin: 0
+    font-size: 14px
 
 .stream-failures-pane
-  height: 24rem
-  overflow-y: auto
-  overflow-x: hidden
   border: 1px solid colors.$light-gray2
   border-radius: 4px
   background: rgba(colors.$light-gray5, 0.35)
@@ -39,21 +25,32 @@
     background: rgba(colors.$black, 0.25)
 
 .stream-failures-state
-  height: 100%
-  padding: 24px
+  display: flex
+  align-items: center
+  gap: 8px
+  min-height: 40px
+  padding: 10px
+  color: colors.$gray2
 
-.stream-failures-error
+  .bp5-dark &
+    color: colors.$gray4
+
+.stream-failures-error.bp5-callout
   display: flex
   flex-wrap: wrap
   align-items: center
   gap: 6px 10px
+  width: auto
   margin: 10px
+  overflow-wrap: anywhere
 
 .stream-failures-list
   display: flex
   flex-direction: column
   gap: 8px
   padding: 10px
+  max-height: 24rem
+  overflow-y: auto
 
 .stream-failure
   padding: 10px
@@ -135,11 +132,10 @@
 
 @media (max-width: 480px)
   .stream-failures-heading
-    align-items: flex-start
-    flex-direction: column
+    flex-wrap: wrap
 
   .stream-failures-heading > .bp5-button
-    align-self: flex-end
+    flex-shrink: 0
 
   .stream-failure header
     flex-direction: column
