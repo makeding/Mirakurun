@@ -19,6 +19,7 @@ import * as stream from "stream";
 import * as util from "util";
 import EventEmitter = require("eventemitter3");
 import * as common from "./common";
+import { DvbFrontendPool } from "./DvbFrontend";
 import * as log from "./log";
 import * as config from "./config";
 import * as apid from "../../api";
@@ -102,7 +103,7 @@ export default class TunerDevice extends EventEmitter {
     private _lastDataAt = 0;
     private _commandFailed = false;
 
-    constructor(private _index: number, private _config: apid.ConfigTunersItem) {
+    constructor(private _index: number, private _config: apid.ConfigTunersItem, private _dvbPool?: DvbFrontendPool) {
         super();
         this._isRemote = !!this._config.remoteMirakurunHost;
         Event.emit("tuner", "create", this.toJSON());
@@ -256,7 +257,8 @@ export default class TunerDevice extends EventEmitter {
             return false;
         }
 
-        return this._isDevicePathReady();
+        return this._isDevicePathReady() &&
+            (this._config.dvbAutoDiscovery !== true || this._dvbPool?.canAcquire(this._index, channel) === true);
     }
 
     toJSON(): TunerDeviceStatus {
@@ -558,19 +560,34 @@ export default class TunerDevice extends EventEmitter {
             cmd = ch.type === "BS4K" && this._config.commandBS4K ? this._config.commandBS4K : this._config.command;
         }
 
-        cmd = common.replaceCommandTemplate(cmd, {
-            channel: ch.channel,
-            type: common.getTuningChannelType(ch.type),
-            channelType: ch.type,
-            route: ch.route.toLowerCase(),
-            satelite: ch.commandVars?.satellite || "", // deprecated, for backward compatibility
-            space: 0, // default value for backward compatibility
-            ...ch.commandVars
-        });
+        const frontend = this._config.dvbAutoDiscovery === true ? this._dvbPool?.acquire(this._index, ch) : null;
+        if (this._config.dvbAutoDiscovery === true && !frontend) {
+            throw new Error("DVB frontend discovery is unavailable");
+        }
 
-        const parsed = common.parseCommandForSpawn(cmd);
+        try {
+            cmd = common.replaceCommandTemplate(cmd, {
+                channel: ch.channel,
+                type: common.getTuningChannelType(ch.type),
+                channelType: ch.type,
+                route: ch.route.toLowerCase(),
+                satelite: ch.commandVars?.satellite || "", // deprecated, for backward compatibility
+                space: 0, // default value for backward compatibility
+                ...ch.commandVars,
+                ...(frontend ? {
+                    dvbFrontendPath: frontend.path,
+                    dvbAdapter: frontend.adapter,
+                    dvbFrontend: frontend.frontend
+                } : {})
+            });
 
-        this._process = child_process.spawn(parsed.command, parsed.args);
+            const parsed = common.parseCommandForSpawn(cmd);
+
+            this._process = child_process.spawn(parsed.command, parsed.args);
+        } catch (err) {
+            if (frontend) { this._dvbPool.release(this._index); }
+            throw err;
+        }
         this._command = cmd;
         this._channel = ch;
         this._streamUsesMMTSDecoder = false;
@@ -599,7 +616,7 @@ export default class TunerDevice extends EventEmitter {
                 }
             });
 
-            this._process.once("exit", () => cat.kill("SIGKILL"));
+            this._process.once("close", () => cat.kill("SIGKILL"));
 
             this._stream = cat.stdout;
         } else {
@@ -611,8 +628,10 @@ export default class TunerDevice extends EventEmitter {
 
         this._process.once("exit", () => this._exited = true);
 
+        let processFinished = false;
         this._process.once("error", (err) => {
-            log.fatal("TunerDevice#%d process error `%s` (pid=%d)", this._index, err.name, this._process.pid);
+            if (processFinished) { return; }
+            log.fatal("TunerDevice#%d process error `%s` (pid=%d)", this._index, err.message, this._process.pid);
 
             this._commandFailed = true;
             ++this._fatalCount;
@@ -623,16 +642,18 @@ export default class TunerDevice extends EventEmitter {
                 this._closing = true;
             }
             this._end();
-            setTimeout(this._release.bind(this), this._config.dvbDevicePath ? 1000 : 100);
+            // A spawn failure also emits close. Keep the device lease until then.
         });
 
         this._process.once("close", (code, signal) => {
+            if (processFinished) { return; }
+            processFinished = true;
             log.info(
                 "TunerDevice#%d process has closed with exit code=%d by signal `%s` (pid=%d)",
                 this._index, code, signal, this._process.pid
             );
 
-            this._commandFailed = code !== 0 || signal !== null;
+            this._commandFailed = this._commandFailed || code !== 0 || signal !== null;
             this._startCooldownIfNeeded(code, signal);
             this._end();
             setTimeout(this._release.bind(this), this._config.dvbDevicePath ? 1000 : 100);
@@ -952,6 +973,7 @@ export default class TunerDevice extends EventEmitter {
         }
         this._closeMMTSDecoder();
 
+        if (this._config.dvbAutoDiscovery === true) { this._dvbPool?.release(this._index); }
         this._command = null;
         this._process = null;
         this._stream = null;
@@ -970,8 +992,15 @@ export default class TunerDevice extends EventEmitter {
 
                 const users = [...this._users];
                 const disableMMTSDecoder = users.length > 0 && users.every(user => user.disableMMTSDecoder === true);
-                this._spawn(this._channel, disableMMTSDecoder);
-                return;
+                try {
+                    this._spawn(this._channel, disableMMTSDecoder);
+                    return;
+                } catch (err) {
+                    log.error("TunerDevice#%d cannot respawn: %s", this._index, err.message);
+                    this.emit("streamFailure", this._channel);
+                    for (const user of this._users) { user._stream.end(); }
+                    this._users.clear();
+                }
             }
         }
 

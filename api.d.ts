@@ -428,6 +428,10 @@ export interface ConfigTunersItem {
     command?: string;
     /** [chardev][dvb] command to get BS4K/MMTS. Falls back to `command` when omitted. */
     commandBS4K?: string;
+    /** Enable driver-based Linux DVB frontend selection. */
+    dvbAutoDiscovery?: boolean;
+    /** Optional /dev/dvb/adapterN/frontendM pin; empty selects a compatible free frontend. */
+    dvbFrontendPath?: string;
     /** [dvb] dvr adapter device path */
     dvbDevicePath?: string;
     /** Optional device path checked before starting this tuner. Falls back to dvbDevicePath when omitted. */

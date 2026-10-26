@@ -13,10 +13,9 @@
    See the License for the specific language governing permissions and
    limitations under the License.
 */
-import { execSync } from "child_process";
 import { dirname } from "path";
 import { hostname } from "os";
-import { existsSync, readdirSync } from "fs";
+import { existsSync } from "fs";
 import { mkdir, copyFile, readFile, writeFile } from "fs/promises";
 import * as yaml from "js-yaml";
 import * as ipnum from "ip-num";
@@ -25,6 +24,7 @@ import * as apid from "../../api";
 import * as log from "./log";
 import { isValidCronExpression } from "./Job";
 import { channelTypes } from "./common";
+import { discoverDvbFrontends, generateDvbTunerConfigs } from "./DvbFrontend";
 
 type Writable<T> = { -readonly [K in keyof T]: T[K] };
 
@@ -299,49 +299,10 @@ export async function loadTuners(): Promise<Tuner[]> {
     if (existsSync(path) === false) {
         log.info("missing tuners config `%s`", path);
         log.info("trying to detect tuners...");
-        const tuners: Tuner[] = [];
-
-        // detect dvbdev
-        try {
-            execSync("which dvb-fe-tool");
-
-            const adapters = readdirSync("/dev/dvb").filter(name => /^adapter[0-9]+$/.test(name));
-            for (let i = 0; i < adapters.length; i++) {
-                log.info("detected DVB device: %s", adapters[i]);
-
-                execSync("sleep 1");
-                const properties = execSync(`dvb-fe-tool -a ${i} 2>&1 || true`, { encoding: "utf8" });
-                const isISDBT = properties.includes("[ISDBT]");
-                const isISDBS = properties.includes("[ISDBS]");
-                if (!isISDBT && !isISDBS) {
-                    continue;
-                }
-
-                const tuner: Writable<Tuner> = {
-                    name: adapters[i],
-                    types: undefined,
-                    dvbDevicePath: `/dev/dvb/adapter${i}/dvr0`,
-                    decoder: "arib-b25-stream-test"
-                };
-
-                if (isISDBT) {
-                    tuner.types = ["GR"];
-                    tuner.command = `dvbv5-zap -a ${i} -c ./config/dvbconf-for-isdb/conf/dvbv5_channels_isdbt.conf -r -P <channel>`;
-                } else if (isISDBS) {
-                    tuner.types = ["BS", "CS"];
-                    tuner.command = `dvbv5-zap -a ${i} -c ./config/dvbconf-for-isdb/conf/dvbv5_channels_isdbs.conf -r -P <channel>`;
-                }
-
-                tuners.push(tuner);
-
-                log.info("added tuner config (generated): %s", JSON.stringify(tuner));
-            }
-        } catch (e) {
-            if (/which dvb-fe-tool/.test(e.message)) {
-                log.warn("`dvb-fe-tool` is required to detect DVB devices. (%s)", e.message);
-            } else {
-                console.error(e);
-            }
+        // Use the same driver capability discovery as runtime frontend selection.
+        const tuners = generateDvbTunerConfigs(discoverDvbFrontends());
+        for (const tuner of tuners) {
+            log.info("added tuner config (generated): %s", JSON.stringify(tuner));
         }
 
         log.info("detected %d tuners!", tuners.length);

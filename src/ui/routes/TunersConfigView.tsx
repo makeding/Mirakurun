@@ -32,6 +32,7 @@ import {
     HTMLTable
 } from "@blueprintjs/core";
 import equal from "fast-deep-equal";
+import { validateDvbConfig } from "../../DvbConfig";
 import { state } from "../modules/state";
 import * as ui from "../modules/ui";
 import { ConfigTuners, ConfigTunersItem, ChannelType } from "../../../api.d";
@@ -52,6 +53,8 @@ export const TunersConfigView: React.FC = () => {
     const [editing, setEditing] = useState<ConfigTuners | null>(null);
     const [showSaveDialog, setShowSaveDialog] = useState(false);
     const [saved, setSaved] = useState(false);
+    const [saving, setSaving] = useState(false);
+    const [saveError, setSaveError] = useState<string | null>(null);
     const [isLoading, setIsLoading] = useState(true);
 
     ui.setTitle("チューナー設定", isLoading);
@@ -80,29 +83,43 @@ export const TunersConfigView: React.FC = () => {
     }, [saved]);
 
     const hasChanges = editing !== null && current !== null && !equal(editing, current);
+    const configError = editing?.map((tuner, i) => {
+        const error = validateDvbConfig(tuner);
+        return error ? `Tuner #${i}: ${error}` : null;
+    }).find(error => error !== null);
 
     const handleCancel = () => {
+        setSaveError(null);
         if (current) {
             setEditing(JSON.parse(JSON.stringify(current)));
         }
     };
 
     const handleSave = async () => {
-        if (!editing) {
+        if (!editing || saving) {
             return;
         }
 
+        setSaving(true);
+        setSaveError(null);
         setShowSaveDialog(false);
         try {
             console.log("TunersConfigView", "PUT", configAPI, "<-", editing);
-            await fetch(configAPI, {
+            const response = await fetch(configAPI, {
                 method: "PUT",
                 headers: { "Content-Type": "application/json; charset=utf-8" },
                 body: JSON.stringify(editing)
             });
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error(error.reason || `HTTP ${response.status}`);
+            }
             setSaved(true);
         } catch (err) {
             console.error(err);
+            setSaveError(`Save failed: ${err.message}. Correct the configuration and save again.`);
+        } finally {
+            setSaving(false);
         }
     };
 
@@ -112,8 +129,8 @@ export const TunersConfigView: React.FC = () => {
         const newTuner: ConfigTunersItem = {
             name: `adapter${i}`,
             types: [],
-            command: `dvbv5-zap -a ${i} -c ./config/dvbconf-for-isdb/conf/dvbv5_channels_isdbs.conf -r -P <channel>`,
-            dvbDevicePath: `/dev/dvb/adapter${i}/dvr0`,
+            command: "dvbv5-zap -a <dvbAdapter> -f <dvbFrontend> -c ./config/dvbconf-for-isdb/conf/dvbv5_channels_isdbs.conf -r -P -o - <channel>",
+            dvbAutoDiscovery: true,
             decoder: "arib-b25-stream-test",
             mmtsDecoder: "dantto4k - -",
             isDisabled: true
@@ -180,6 +197,7 @@ export const TunersConfigView: React.FC = () => {
                     intent="success"
                     icon="add"
                     text="Add Tuner"
+                    disabled={saving}
                     onClick={handleAddTuner}
                 />
 
@@ -190,14 +208,14 @@ export const TunersConfigView: React.FC = () => {
                     intent="danger"
                     icon="undo"
                     text="Cancel"
-                    disabled={!hasChanges}
+                    disabled={!hasChanges || saving}
                     onClick={handleCancel}
                 />
                 <Button
                     intent="primary"
                     icon="saved"
                     text="Save"
-                    disabled={!hasChanges}
+                    disabled={!hasChanges || saving || !!configError}
                     onClick={() => setShowSaveDialog(true)}
                 />
             </Navbar.Group>
@@ -222,6 +240,10 @@ export const TunersConfigView: React.FC = () => {
             {toolbar}
 
             <div className="content">
+                <div className="tuner-config-status" role="status">
+                    {saving ? "Saving..." : (configError || saveError)}
+                </div>
+                <fieldset className="tuner-fields" disabled={saving}>
                 <HTMLTable className="tuner-table" striped interactive>
                     <thead>
                         <tr>
@@ -311,6 +333,31 @@ export const TunersConfigView: React.FC = () => {
                                                         />
                                                     </FormGroup>
                                                 )}
+                                                <Checkbox
+                                                    label="DVB frontend selection"
+                                                    checked={tuner.dvbAutoDiscovery === true}
+                                                    onChange={(e) => {
+                                                        updateTuner(i, {
+                                                            dvbAutoDiscovery: e.currentTarget.checked,
+                                                            ...(!e.currentTarget.checked ? { dvbFrontendPath: undefined } : {})
+                                                        });
+                                                    }}
+                                                />
+                                                <FormGroup label="DVB Frontend Path">
+                                                    <InputGroup
+                                                        value={tuner.dvbFrontendPath || ""}
+                                                        disabled={tuner.dvbAutoDiscovery !== true}
+                                                        placeholder="Automatic"
+                                                        onChange={(e) => {
+                                                            const val = e.target.value;
+                                                            if (val === "") {
+                                                                deleteTunerProperty(i, "dvbFrontendPath");
+                                                            } else {
+                                                                updateTuner(i, { dvbFrontendPath: val });
+                                                            }
+                                                        }}
+                                                    />
+                                                </FormGroup>
                                                 <FormGroup label="DVB Device Path">
                                                     <InputGroup
                                                         value={tuner.dvbDevicePath || ""}
@@ -460,6 +507,7 @@ export const TunersConfigView: React.FC = () => {
                         ))}
                     </tbody>
                 </HTMLTable>
+                </fieldset>
             </div>
 
             {/* Save Confirmation Dialog */}
@@ -478,7 +526,7 @@ export const TunersConfigView: React.FC = () => {
                             <Button onClick={() => setShowSaveDialog(false)}>キャンセル</Button>
                             <Button
                                 intent="primary"
-                                disabled={!hasChanges}
+                                disabled={!hasChanges || saving || !!configError}
                                 onClick={handleSave}
                             >
                                 保存

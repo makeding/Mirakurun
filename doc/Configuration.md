@@ -122,6 +122,34 @@ Specify the CAS processing command as needed.
 
 When a tuner supports `BS4K` together with `BS` / `CS`, specify `commandBS4K` to use a dedicated command for `BS4K` channels. If `commandBS4K` is omitted, `command` is used. Specify `mmtsDecoder` when the `BS4K` command output needs MMTS conversion.
 
+#### Optional DVB frontend selection
+
+Set `dvbAutoDiscovery: true` to let Mirakurun select a Linux DVB frontend for this tuner entry. Leave `dvbFrontendPath` empty for automatic selection, or set it to `/dev/dvb/adapterN/frontendM` to pin the entry to that frontend. Existing command, remote, and `dvbDevicePath` configurations keep their behavior when this mode is off.
+
+At startup Mirakurun enumerates `/dev/dvb/adapter*/frontend*` and runs `dvb-fe-tool -a N -f M` from v4l-utils with the C locale. This read-only query obtains the driver's supported delivery systems (`DTV_ENUM_DELSYS` on DVBv5). Install `dvb-fe-tool` in the server/container PATH and expose the DVB device nodes. Missing tools, permission errors, unsupported systems, or missing devices leave affected entries unselectable and produce a server log; other tuners remain usable. Restart after adding devices or changing drivers. Initial configuration generation creates one slot per adapter and, as before, prefers the terrestrial channel file when an adapter supports both terrestrial and satellite reception; configure the other reception family explicitly when needed.
+
+Each configured entry provides one simultaneous tuning slot. On each tune, Mirakurun leases a compatible free frontend, injects `<dvbFrontendPath>`, `<dvbAdapter>` and `<dvbFrontend>` into the command, and holds the lease until the command has stopped and the stream is released. The command must contain either `<dvbFrontendPath>` or both `<dvbAdapter>` and `<dvbFrontend>`, including `commandBS4K` when set. Channel variables cannot override these device selections. Normal channel restrictions, priorities, stream sharing, cooldown and failover still apply.
+
+Driver capabilities select ISDB-T for GR/GR-ALT, ISDB-S for satellite BS/CS, DVB-S/S2 for SKY, and ISDB-S3 for satellite BS4K. CATV/HIKARI BS/CS/BS4K require ISDB-C. ISDB-S or DVB-S2 alone never implies BS4K support. The command and its channel configuration remain responsible for tuning parameters and output format.
+
+For safety, all frontends in one adapter share one lease: multiple frontend nodes can represent mutually exclusive modes sharing a demux/DVR. This mode does not infer independent capture pipelines inside one adapter. Pinned frontend entries reserve their adapter even while idle. Enabled legacy entries with `dvbDevicePath`, `checkDevicePath`, a literal DVB path in their command, or a direct `dvbv5-zap -a N` command reserve that adapter from automatic use. For an opaque wrapper command, set `checkDevicePath` to its DVB frontend so the reservation is explicit. Disabled and remote entries do not reserve local devices.
+
+Prefer commands that output the stream on stdout, for example:
+
+```yaml
+- name: DVB-GR-1
+  types: [GR]
+  dvbAutoDiscovery: true
+  # Optional: dvbFrontendPath: /dev/dvb/adapter0/frontend0
+  command: dvbv5-zap -a <dvbAdapter> -f <dvbFrontend> -c /etc/mirakurun/dvbv5-gr.conf -r -P -o - <channel>
+```
+
+`dvbDevicePath` retains its existing meaning as a separate DVR read path. When combined with frontend selection it must be `/dev/dvb/adapterN/dvr0` and requires a pinned frontend in the same adapter; it cannot remain fixed while the frontend moves automatically.
+
+The configuration UI keeps the frontend selector and path field in fixed slots when toggled; disabling selection disables the path field and clears the pin. Empty path visibly means automatic selection. At narrow widths the tuner rows reflow into full-width options with wrapped type choices; all fields and row actions remain visible. Invalid configuration disables Save and shows its reason; a failed HTTP save preserves the draft and offers saving again. Saving and reloading must preserve both modes; editing the path must retain focus.
+
+Acceptance: cover driver capability parsing (including misleading device names and the current system), nonzero probe exits and missing tools, mixed dedicated/hybrid frontends, automatic and pinned selection, legacy reservations, competing entries, lease release on exit/spawn failure, command substitution, and legacy stdout behavior. Request the real configuration and tuner HTTP entry points; hardware acceptance additionally requires Linux DVB enumeration and concurrent real reception, which simulated frontends cannot prove.
+
 #### checkDevicePath
 
 Specify a device path that must exist before this tuner can be started. If the path is missing, Mirakurun skips this tuner and tries the next matching tuner. When `checkDevicePath` is omitted, `dvbDevicePath` is used as the preflight path if it is set.

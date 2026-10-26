@@ -79,6 +79,54 @@ TLV for decode=0); new configurations use `defaultTlvStreamFormat` (TLV by defau
 Legacy combined decryption/conversion commands retain their deployed semantics;
 independent control requires separate decoder/converter commands.
 
+External TLV decoder/converter completion requires successful process exit,
+finished input and fully drained output. Client cancellation releases the entire
+per-request pipeline without reporting its interrupted stdin finalization as an
+uncaught exception. A failed or prematurely exited stage fails that request:
+HTTP 503 before response bytes, or an aborted response after streaming starts.
+It must not return an empty/truncated successful response or splice a restarted
+converter into an existing stream. Validation covers both stages, cancellation
+and all stream endpoint families with controlled child processes.
+
+TLV requests have an independent shared byte budget across decoder input queues
+and the final output wrapper (32 MiB by default). This budget counts pending
+application writes; Node's existing PassThrough and socket buffers are additional
+bounded buffers, not included in that number. A slow consumer never pauses a
+shared tuner or silently discards recording bytes: only that request fails.
+Decoder stdout respects downstream backpressure. Defaults are 10 seconds for
+first decoder output, 30 seconds for missing source input or blocked output,
+15 seconds for conversion without progress while input arrives, and 10 seconds
+for final drain after input ends. Timers do not charge tuner acquisition time
+before TLV detection; downstream congestion is classified separately from
+converter stalls. Cancellation is not a failure and releases all owned stages.
+Server `tlvStreamProtection` may override these positive durations (milliseconds)
+and `maxBufferBytes`; omitted/invalid values use the application defaults.
+
+`GET /api/stream-failures` exposes the last 50 TLV request failures in this server
+process, newest first. It includes stage, stable failure code, request/channel,
+byte counters, timestamps, exit information and at most 4096 characters of
+redacted stderr. Refresh retains these records; a server restart clears them.
+The home page keeps diagnostics in normal document flow: loading and empty
+states use the same compact status row, and a failed refresh shows its reason
+and retry action without covering other sections. The list grows with its
+contents up to 24rem, then scrolls; no empty 24rem panel is reserved. Background
+refresh preserves existing results and focus. Desktop and narrow layouts must
+keep the heading, refresh action and full failure details usable. Failures
+retain the existing HTTP error body; the diagnostics endpoint supplies detail
+without changing deployed consumers.
+
+Live validation on 2026-10-25 used Hiraku BS4K1 / BS17_0 (NHK BSP4K),
+the current local Tuner/StreamFilter/HTTP server, production-version dantto4k
+over SSH stdin/stdout, and native macOS mmt2ts 0.1.5. Channel/service requests
+covered input EOF, client cancellation, reconnect, and converter termination
+before headers and during streaming. Successful responses contained 3840x2160
+HEVC and AAC; FFmpeg decoded three distinct 4K frames. Failure injection returned
+503 before headers or an incomplete response after bytes. All cases released
+filters/decoders without uncaught exceptions or respawns. Short captures were
+kept in bounded memory only; this does not establish long-duration recording
+stability. Some dantto4k tune-ins emitted initial SPS/reference-frame warnings;
+the final decode check and native mmt2ts run had no FFmpeg errors.
+
 ### Playback and recording consumers
 
 HonomiTV and EPGStation keep using service/program streams, rather than whole

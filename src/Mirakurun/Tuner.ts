@@ -19,6 +19,7 @@ import * as log from "./log";
 import * as apid from "../../api";
 import _ from "./_";
 import TunerDevice, { TunerDeviceStatus, TunerStartupError } from "./TunerDevice";
+import { discoverDvbFrontends, DvbFrontendPool, validateDvbConfig } from "./DvbFrontend";
 import ChannelItem from "./ChannelItem";
 import ServiceItem from "./ServiceItem";
 import StreamFilter from "./StreamFilter";
@@ -462,6 +463,8 @@ export class Tuner {
         log.debug("loading tuners...");
 
         const tuners = _.config.tuners;
+        const dvbPool = tuners.some(tuner => tuner.dvbAutoDiscovery === true && !tuner.isDisabled && !tuner.remoteMirakurunHost)
+            ? new DvbFrontendPool(discoverDvbFrontends(), tuners) : null;
 
         tuners.forEach((tuner, i) => {
             if (!tuner.name || !tuner.types || (!tuner.remoteMirakurunHost && !tuner.command && !tuner.commandBS4K)) {
@@ -556,7 +559,16 @@ export class Tuner {
                 return;
             }
 
-            const device = new TunerDevice(i, tuner);
+            const dvbError = validateDvbConfig(tuner);
+            if (dvbError) {
+                log.error("invalid DVB configuration in tuner#%s: %s", i, dvbError);
+                return;
+            }
+
+            if (tuner.dvbAutoDiscovery === true && !dvbPool.canAcquire(i)) {
+                log.warn("tuner#%s has no usable DVB frontend: check driver capabilities, device permissions and adapter reservations; restart after fixing discovery", i);
+            }
+            const device = new TunerDevice(i, tuner, dvbPool);
             device.on("streamFailure", (channel: ChannelItem) => this._handleStreamFailure(device, channel));
             this._devices.push(device);
         });

@@ -17,6 +17,7 @@ import { Operation } from "express-openapi";
 import * as api from "../../api";
 import * as apid from "../../../../api";
 import * as config from "../../config";
+import { validateDvbConfig } from "../../DvbFrontend";
 
 export const get: Operation = async (req, res) => {
     res.status(200);
@@ -44,6 +45,14 @@ get.apiDoc = {
 
 export const put: Operation = async (req, res) => {
     const tuners: apid.ConfigTuners = req.body;
+
+    for (let i = 0; i < tuners.length; i++) {
+        const error = validateDvbConfig(tuners[i]);
+        if (error) {
+            api.responseError(res, 400, `Tuner #${i}: ${error}`);
+            return;
+        }
+    }
 
     await config.saveTuners(tuners);
 

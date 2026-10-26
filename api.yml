@@ -840,6 +840,12 @@ definitions:
         type: string
       commandBS4K:
         type: string
+      dvbAutoDiscovery:
+        type: boolean
+        description: Enable driver-based Linux DVB frontend selection.
+      dvbFrontendPath:
+        type: string
+        description: Optional /dev/dvb/adapterN/frontendM pin. Empty selects a compatible free frontend.
       dvbDevicePath:
         type: string
       checkDevicePath:
