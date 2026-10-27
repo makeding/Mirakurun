@@ -19,6 +19,22 @@ const { test } = require("node:test");
 const React = require("react");
 const { renderToStaticMarkup } = require("react-dom/server");
 const ts = require("typescript");
+const sass = require("sass");
+const { pathToFileURL } = require("node:url");
+const { resolve } = require("node:path");
+
+test("stream history uses page scrolling without a nested scroll container", () => {
+    const filename = require.resolve("../src/ui/components/StreamFailures.sass");
+    const { css } = sass.compileString(readFileSync(filename, "utf8"), {
+        syntax: "indented",
+        importers: [{ findFileUrl: url => url.startsWith("~")
+            ? pathToFileURL(resolve(__dirname, "../node_modules", url.slice(1))) : null }]
+    });
+    const list = css.match(/\.stream-failures-list\s*\{([^}]+)\}/)?.[1];
+    assert.ok(list, "failure list styles must be emitted");
+    assert.doesNotMatch(list, /(?:^|[;\s])(?:max-height|height)\s*:/);
+    assert.doesNotMatch(list, /overflow(?:-y)?\s*:\s*(?:auto|scroll|hidden|clip)/);
+});
 
 test("stream history loading stays inline instead of covering the home page", () => {
     const filename = require.resolve("../src/ui/components/StreamFailures.tsx");
