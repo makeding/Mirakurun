@@ -98,6 +98,28 @@ test("scheduled collection acquires each broadcast once and still runs distinct 
     await task;
 });
 
+test("automatic HGuide yields to service scans and EPG jobs while manual Run stays available", async t => {
+    const value = guide([channel("GR", "13")]);
+    const jobs = _.job.jobs;
+    const automatic = value.collectionJob(true);
+    const manual = value.collectionJob();
+    for (const key of ["Service.Add.Check.CS.CS6.363", "Service.Add.Scan.GR.13", "Service.Update.Scan.BS.BS01_0", "EPG.Gatherer"]) {
+        jobs.push({ key, status: "queued" });
+        assert.equal(await automatic.readyFn(), false, key);
+        assert.equal(manual.readyFn, undefined);
+        jobs.pop();
+    }
+    assert.equal(await automatic.readyFn(), true);
+    value.collectTargets = async signal => {
+        await new Promise((resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
+    };
+    const running = automatic.fn({ signal: new AbortController().signal });
+    jobs.push({ key: "Service.Add.Scan.GR.14", status: "queued" });
+    await assert.rejects(running, /GGuide yielded to tuner jobs/);
+    assert.equal(value.active, undefined);
+    t.after(() => jobs.pop());
+});
+
 test("passive aliases share one decoder and cooldown, preserving the actual reception source", async t => {
     const value = guide([channel("GR-ALT", "22"), channel("GR-ALT", "T22"), channel("GR", "22")]);
     value.initialized = true;

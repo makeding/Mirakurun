@@ -92,7 +92,8 @@ export default class GGuide {
                 _.job.addSchedule({ key: "gguide:scheduled", schedule: this.schedule === "auto" ? "* * * * *" : this.schedule,
                     job: this.collectionJob(),
                     scheduledJob: this.schedule === "auto" ? () =>
-                        this.store.enabled && !this.isCollecting() && this.getAutomaticTargets().length ? this.collectionJob(true) : undefined : undefined
+                        this.store.enabled && !this.isCollecting() && !this.hasHigherPriorityJobs() && this.getAutomaticTargets().length
+                            ? this.collectionJob(true) : undefined : undefined
                 });
             }
         } catch (err) {
@@ -221,19 +222,30 @@ export default class GGuide {
         return {
             key: "gguide:scheduled", name: "HGuide Getherer", isRerunnable: false,
             retryOnAbort: false, retryOnFail: false,
+            readyFn: automatic ? async () => !this.hasHigherPriorityJobs() : undefined,
             fn: async ({ signal }) => {
                 if (!this.store.enabled) { return; }
                 if (!this.decodeBytes || this.shutdown.signal.aborted) { throw new Error("GGuide decoder unavailable"); }
                 if (this.active) { throw new Error("A GGuide collection is already running"); }
                 for (const [id, session] of this.passive) { this.finishPassive(id, session); }
+                const yieldCapture = new AbortController();
+                const watcher = automatic ? setInterval(() => {
+                    if (this.hasHigherPriorityJobs()) { yieldCapture.abort(new Error("GGuide yielded to tuner jobs")); }
+                }, 1000) : undefined;
                 const run = async () => {
                     await Promise.all([...this.pendingSaves]);
-                    await this.collectTargets(AbortSignal.any([signal, this.shutdown.signal]), automatic);
+                    await this.collectTargets(AbortSignal.any([signal, this.shutdown.signal, yieldCapture.signal]), automatic);
                 };
                 this.active = run();
-                try { await this.active; } finally { this.active = undefined; }
+                try { await this.active; } finally { clearInterval(watcher); this.active = undefined; }
             }
         };
+    }
+
+    private hasHigherPriorityJobs(): boolean {
+        return !!_.job?.jobs.some(job => job.status !== "finished" && (
+            job.key === "EPG.Gatherer" || job.key.startsWith("Service.Add.Check.") ||
+            job.key.startsWith("Service.Add.Scan.") || job.key.startsWith("Service.Update.Scan.")));
     }
 
     private drainPassive(tunerId: number, session: PassiveCapture): void {
@@ -437,7 +449,7 @@ export default class GGuide {
             filter?.close();
             output.destroy();
         };
-        const abort = () => finish(new Error("GGuide collection aborted"));
+        const abort = () => finish(signal.reason instanceof Error ? signal.reason : new Error("GGuide collection aborted"));
         const output = new Writable({
             write(chunk: Buffer, encoding, callback) {
                 try {
