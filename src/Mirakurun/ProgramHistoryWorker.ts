@@ -28,6 +28,7 @@ import { rejectWhere } from "./common";
 import { mergeGGuideIndex } from "./GGuideProgramIndex";
 import { mergeMembers } from "./GGuideStore";
 import { mergeGGuideReception } from "./GGuideReception";
+import { programValidationError } from "./ProgramValidation";
 
 const DAY = 86400000;
 let database: DatabaseSync;
@@ -69,21 +70,15 @@ function canonical(value: any): string {
     return JSON.stringify(value);
 }
 
-function validProgram(program: Program): boolean {
-    return program && [program.id, program.networkId, program.serviceId, program.eventId, program.startAt, program.duration]
-        .every(value => Number.isSafeInteger(value) && value >= 0) && typeof program.isFree === "boolean";
-}
-
 function writeMutation(mutation: HistoryMutation): void {
     const { program, observedAt } = mutation;
+    const error = programValidationError(program);
+    if (error) { throw new Error(error); }
     let { status, reason } = mutation;
     if (status === "active" && program.startAt + program.duration <
         observedAt - (program.duration === 1 ? DAY : 3 * 3600000)) {
         status = "archived";
         reason = "gc";
-    }
-    if (!validProgram(program)) {
-        throw new Error("Invalid program supplied to history storage");
     }
     const previous = database.prepare("SELECT * FROM programs WHERE network_id=? AND service_id=? AND event_id=? ORDER BY sequence DESC LIMIT 1").get(program.networkId, program.serviceId, program.eventId);
     const publicJSON = canonical(publicProgram(program));
@@ -344,8 +339,9 @@ function open(options: HistoryOptions): { active: Program[]; removed: Program[] 
                 const header = contents[0]?.__integrity__;
                 const programs = header ? contents.slice(1) : contents;
                 for (const program of programs) {
-                    if (!validProgram(program)) {
-                        throw new Error("Invalid record in legacy program database");
+                    const error = programValidationError(program);
+                    if (error) {
+                        throw new Error(`Invalid record in legacy program database: ${error}`);
                     }
                     if (program.startAt + program.duration >= now - retentionDays * DAY) {
                         writeMutation({ program, observedAt: now, status:

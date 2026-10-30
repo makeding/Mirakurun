@@ -114,6 +114,31 @@
   isDisabled: false # Boolean
 ```
 
+#### group
+
+`group` optionally names a shared reception source, for example `puniru-sat`
+or `j-sat`. Give tuners using the same antenna/site the same group, including
+BS, CS and BS4K slots. Separate independent reception paths into different groups.
+Without a name, local tuners share a group per delivery route (`SAT`, `TER`,
+`CATV`, `HIKARI`); remote tuners share a group per host, port and delivery route.
+Local paths retain their normal preference over remote paths.
+
+If one tuner fails acquisition or stops producing source bytes, new acquisitions
+skip its reception group for 30 seconds and try the next eligible group. A busy
+tuner, client cancellation, preemption or decoder/output failure does not mark
+the reception group unhealthy. Existing streams still delivering data can be
+shared. After cooldown, only one acquisition probes the failed group; other
+requests keep using alternatives until 30 seconds of continuous input confirms
+recovery. Group failover respects channel restrictions and local-only requests.
+It requires another group that can receive the requested channel and format;
+a BS-only backup cannot receive BS4K.
+
+Both local and remote acquisitions wait up to five seconds for source data.
+An active source that sends no data for five seconds is released and its users
+are ended so consumers can reconnect through another group. This is source
+availability detection, not a guarantee of seamless switching or RF quality
+measurement while bytes continue arriving.
+
 #### decoder
 
 Specify the CAS processing command as needed.

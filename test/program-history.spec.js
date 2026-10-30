@@ -380,6 +380,42 @@ describe("[program-history.spec] migration, restart, retention and failure", () 
 });
 
 describe("[program-history.spec] application writers and HTTP cold start", () => {
+    it("rejects invalid observations before mutating current programs or failing storage", async t => {
+        const options = files(t, "invalid-observation");
+        const store = install(t, options);
+        await store.load();
+        const original = program();
+        const other = program(2, original.startAt + 3600000);
+        store.add(original);
+        store.add(other);
+        await store.history.flush();
+        const before = await store.history.list(range());
+        for (const props of [
+            { id: Number.MAX_SAFE_INTEGER + 1 }, { networkId: -1 }, { serviceId: undefined },
+            { eventId: null }, { startAt: NaN }, { startAt: -1 }, { duration: Infinity },
+            { duration: 1.5 }, { isFree: undefined }
+        ]) {
+            store.add({ ...program(3), ...props });
+            store.set(original.id, props);
+            store.findByNetworkIdAndReplace(1, [{ ...original, ...props }]);
+            observe(store.history, { ...original, ...props });
+        }
+        observe(store.history, null);
+        assert.deepEqual([...store.itemMap.values()], [original, other]);
+        assert.deepEqual(JSON.parse(await store.history.programs({})), [original, other]);
+        assert.deepEqual(await store.history.list(range()), before);
+        store.history.assertWritable();
+        store.set(original.id, { name: "valid later update" });
+        assert.equal(JSON.parse(await store.history.programs({}))[0].name, "valid later update");
+        const { programValidationError } = require("../lib/Mirakurun/ProgramValidation");
+        assert.match(programValidationError({ ...original, startAt: NaN }), /networkId=1, serviceId=1, eventId=1.*startAt=NaN/);
+        await store.close();
+        const restarted = new ProgramHistory(options);
+        const loaded = await restarted.open();
+        assert.deepEqual(loaded.active, [{ ...original, name: "valid later update" }, other]);
+        await restarted.close();
+    });
+
     it("does not restore expired observations or grow unchanged archive revisions", async t => {
         const options = files(t, "expired-observation");
         const store = install(t, options);
@@ -529,6 +565,11 @@ describe("[program-history.spec] application writers and HTTP cold start", () =>
             assert.equal(response.status, status, url);
             return response.json();
         };
+        assert.deepEqual(await request("/programs"), [current]);
+        assert.deepEqual(await request(`/programs/${current.id}`), current);
+        store.set(current.id, { startAt: NaN, name: "must not replace valid data" });
+        store.add({ ...program(3), duration: -1 });
+        store.findByNetworkIdAndReplace(1, [{ ...current, isFree: undefined }]);
         assert.deepEqual(await request("/programs"), [current]);
         assert.deepEqual(await request(`/programs/${current.id}`), current);
         await request(`/programs/${ended.id}`, 404);

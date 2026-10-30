@@ -18,6 +18,7 @@ import { join } from "path";
 import * as apid from "../../api";
 import { Program } from "./db";
 import { rejectWhere } from "./common";
+import { acceptProgram } from "./ProgramValidation";
 import type { GGuideIndexFact } from "./GGuideProgramIndex";
 import type { GGuideReceptionUpdate } from "./GGuideReception";
 
@@ -141,6 +142,7 @@ export class ProgramHistory {
 
     record(mutation: HistoryMutation): void {
         this.assertWritable();
+        if (!acceptProgram(mutation.program)) { return; }
         const json = JSON.stringify(mutation);
         const bytes = Buffer.byteLength(json);
         // Includes in-flight batches, not just the unsent queue.

@@ -187,7 +187,7 @@ test("DVB spawn error releases the lease and permits another configured slot", {
     let releases = 0;
     device.on("release", () => releases++);
     const released = once(device, "release");
-    await device.startStream({ id: "missing", priority: 0 }, sink(), channel());
+    await assert.rejects(device.startStream({ id: "missing", priority: 0 }, sink(), channel()), /failed before first data/);
     await released;
     assert.equal(device.pid, null);
     assert.equal(devices.canAcquire(1, gr), true);
@@ -241,7 +241,7 @@ test("DVB initial configuration generation counts adapters and recognizes all fr
 test("DVB device disappearance at normal child exit closes users and frees its lease", { timeout: 5000 }, async () => {
     shared.event = new Event();
     let present = true;
-    const config = entry({ command: `${process.execPath} -e "setTimeout(()=>process.exit(0),60)" <dvbFrontendPath>` });
+    const config = entry({ command: `${process.execPath} -e "process.stdout.write('ready');setTimeout(()=>process.exit(0),60)" <dvbFrontendPath>` });
     const devices = pool([frontend(0)], [config, entry()], () => present);
     const device = new TunerDevice(0, config, devices);
     const output = sink();

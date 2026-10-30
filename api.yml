@@ -826,6 +826,11 @@ definitions:
       - name
       - types
     properties:
+      group:
+        type: string
+        minLength: 1
+        pattern: '\S'
+        description: Shared reception source; defaults to local/remote endpoint and delivery route.
       name:
         type: string
       types:

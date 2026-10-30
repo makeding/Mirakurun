@@ -418,6 +418,8 @@ export type LogLevel = -1 | 0 | 1 | 2 | 3;
 export type ConfigTuners = ConfigTunersItem[];
 
 export interface ConfigTunersItem {
+    /** Optional shared reception source. Defaults to local/remote endpoint and delivery route. */
+    group?: string;
     /** tuner name for identifying. */
     name: string;
     /** channel type. */

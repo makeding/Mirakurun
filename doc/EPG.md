@@ -28,6 +28,13 @@ SQLite may already have rolled back the transaction automatically. Storage
 failure still blocks subsequent writes; failed batches are never treated as
 committed or retried blindly.
 
+Invalid incoming program identities, timing values or free-to-air flags are
+rejected before changing the current store or queuing history writes. An invalid
+update preserves the previous valid program; an invalid remote replacement
+preserves that network's previous snapshot. Warnings include the program identity
+and invalid fields and values. Such input errors do not disable storage or stop
+the server; actual SQLite and worker failures remain fatal storage failures.
+
 Validation covers startup migration, immediate mutations, ordering, filtering,
 Unicode response lengths, concurrent HTTP requests, and unavailable storage.
 Local fixtures do not establish production-data or physical-tuner acceptance.

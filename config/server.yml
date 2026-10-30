@@ -20,6 +20,8 @@ programHistoryRetentionDays: 365
 # and uses advertised backup windows after a missed or preempted capture.
 # Plans and completion records survive restart. Unknown channels are probed once
 # per six hours (failed probes retry after one hour). Capture priority stays -1.
+# Automatic capture yields to pending EPG gathering and service check/scan jobs,
+# including jobs queued after capture starts. Manual Run keeps its explicit behavior.
 # An explicit cron overrides automatic timing; an empty string disables it.
 # Manual Run in the Jobs schedule always scans the configured terrestrial sources.
 # gguideSchedule: auto

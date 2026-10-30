@@ -16,6 +16,7 @@
 import sift from "sift";
 import { dirname, join } from "path";
 import { HistoryError, ProgramHistory } from "./ProgramHistory";
+import { acceptProgram } from "./ProgramValidation";
 import * as common from "./common";
 import * as log from "./log";
 import * as db from "./db";
@@ -84,6 +85,7 @@ export class Program {
     }
 
     add(item: db.Program, firstAdd: boolean = false): void {
+        if (!acceptProgram(item)) { return; }
         if (!firstAdd) {
             this._assertWritable();
             if (isExpiredProgram(item)) {
@@ -124,6 +126,7 @@ export class Program {
         this._assertWritable();
         let item = this.get(id);
         const candidate = item || this._itemMapDeleted.get(id);
+        if (candidate && !acceptProgram({ ...candidate, ...props })) { return; }
         if (candidate && isExpiredProgram({ ...candidate, ...props })) {
             this._record({ ...candidate, ...props }, "archived", "gc");
             if (item) { this._unindexItem(item); }
@@ -258,6 +261,7 @@ export class Program {
 
     findByNetworkIdAndReplace(networkId: number, programs: db.Program[]): void {
         this._assertWritable();
+        if (programs.some(program => !acceptProgram(program))) { return; }
         let count = 0;
         const programIds = new Set(programs.map(program => program.id));
 

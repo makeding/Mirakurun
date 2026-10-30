@@ -47,6 +47,7 @@ function device(index, name, startStream) {
 
 function tuner(devices) {
     _.config = { server: { disableEITParsing: true } };
+    _.service = { findByChannel: () => [] };
     _.channel = { save() {}, invalidateStreamIDIndex() {} };
     const value = Object.create(Tuner.prototype);
     value._devices = devices;
@@ -154,4 +155,23 @@ test("failed startup closes only its gate and retries the next route", async () 
     assert.deepEqual(started, [failed, healthy]);
     assert.equal(output.destroyed, false);
     filter.close();
+});
+
+test("one failed satellite slot skips its whole reception group on this request and the next channel", async () => {
+    const firstChannel = channel("SAT");
+    const otherChannel = new ChannelItem({ name: "CS", type: "CS", channel: "CS2" });
+    const started = [];
+    const failing = device(0, "roof-1", async () => {
+        started.push("roof-1");
+        throw new TunerStartupError("no signal", "channel");
+    });
+    const sibling = device(1, "roof-2", async () => { started.push("roof-2"); });
+    const backup = device(2, "backup", async (_user, stream) => { started.push("backup"); stream.write(packet()); });
+    for (const receiver of [failing, sibling, backup]) { receiver.config.types = ["BS4K", "CS"]; }
+    backup.config.group = "other-site";
+    const value = tuner([failing, sibling, backup]);
+    const first = await value.initChannelStream(firstChannel, user(), new PassThrough());
+    const next = await value.initChannelStream(otherChannel, user(), new PassThrough());
+    assert.deepEqual(started, ["roof-1", "backup", "backup"]);
+    first.close(); next.close();
 });

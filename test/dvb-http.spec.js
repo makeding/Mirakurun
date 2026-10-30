@@ -60,7 +60,7 @@ test("DVB configurations persist through real HTTP and frontend leases serve cha
         }
     });
     const automatic = {
-        name: "DVB-GR", types: ["GR"], dvbAutoDiscovery: true,
+        name: "DVB-GR", group: "roof-a", types: ["GR"], dvbAutoDiscovery: true,
         command: `${process.execPath} -e "const b=Buffer.alloc(188*32,255);for(let i=0;i<b.length;i+=188){b[i]=71;b[i+1]=0;b[i+2]=20;b[i+3]=16}setInterval(()=>process.stdout.write(b),20)" <dvbAdapter> <dvbFrontend>`
     };
     const pinned = { ...automatic, name: "DVB-Pinned", dvbFrontendPath: "/dev/dvb/adapter5/frontend2" };
@@ -103,6 +103,10 @@ test("DVB configurations persist through real HTTP and frontend leases serve cha
     const saved = await put(updated);
     assert.equal(saved.status, 200);
     assert.deepEqual(await saved.json(), updated);
+    assert.deepEqual(await readJSON("/api/config/tuners"), updated);
+    const invalidGroup = await put([{ ...automatic, group: " " }, pinned, legacy]);
+    assert.equal(invalidGroup.status, 400);
+    await invalidGroup.arrayBuffer();
     assert.deepEqual(await readJSON("/api/config/tuners"), updated);
     assert.deepEqual(yaml.load(fs.readFileSync(process.env.TUNERS_CONFIG_PATH, "utf8")), updated);
     const rejected = await put([{ ...automatic, command: "fixed-device-command" }, pinned, legacy]);

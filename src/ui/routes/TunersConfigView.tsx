@@ -300,6 +300,21 @@ export const TunersConfigView: React.FC = () => {
                                 </td>
                                 <td>
                                     <div className="tuner-options-grid">
+                                        <FormGroup label="Group" labelFor={`tuner-group-${i}`}>
+                                            <InputGroup
+                                                id={`tuner-group-${i}`}
+                                                value={tuner.group || ""}
+                                                placeholder="Automatic"
+                                                onChange={(e) => {
+                                                    const value = e.target.value;
+                                                    if (value === "") {
+                                                        deleteTunerProperty(i, "group");
+                                                    } else {
+                                                        updateTuner(i, { group: value });
+                                                    }
+                                                }}
+                                            />
+                                        </FormGroup>
                                         {!tuner.remoteMirakurunHost && (
                                             <>
                                                 <FormGroup label="Command">
