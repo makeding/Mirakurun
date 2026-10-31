@@ -81,5 +81,21 @@ test("channel HTTP retries another group after local no-data and shares the fail
         await _.tuner.get(2).kill();
     }
     assert.deepEqual(started, ["roof-1", "other-site", "other-site"]);
+    // With no alternate group left, foreground viewing must still be able
+    // to use the second physical receiver instead of returning HTTP 503.
+    _.tuner._devices = _.tuner._devices.slice(0, 2);
+    _.tuner._sourceFailureState.clear();
+    const scarceController = new AbortController(); controllers.push(scarceController);
+    const scarce = await fetch(base + "/channels/BS/BS15_0/stream?decode=0&format=ts",
+        { signal: scarceController.signal });
+    assert.equal(scarce.status, 200);
+    const scarceReader = scarce.body.getReader();
+    const scarceBytes = await scarceReader.read();
+    assert.equal(scarceBytes.done, false);
+    assert.equal(scarceBytes.value[0], 0x47);
+    assert.equal(_.tuner.get(1).isUsing, true);
+    assert.deepEqual(started.slice(3), ["roof-2"], "the healthy sibling should be used immediately");
+    scarceController.abort();await scarceReader.cancel().catch(() => {});
+    await _.tuner.get(1).kill();
     console.log("Group HTTP acceptance: one 5-second local no-data attempt, sibling skipped, BS and CS served by alternate source (simulated receivers)");
 });

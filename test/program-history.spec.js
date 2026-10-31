@@ -567,6 +567,13 @@ describe("[program-history.spec] application writers and HTTP cold start", () =>
         };
         assert.deepEqual(await request("/programs"), [current]);
         assert.deepEqual(await request(`/programs/${current.id}`), current);
+        const Tuner = require("../lib/Mirakurun/Tuner").default;
+        const remoteEPG = Object.create(Tuner.prototype);
+        await assert.rejects(remoteEPG._useRemoteData({ streamSetting: { networkId: current.networkId, parseEIT: true } }, [
+            { isRemote: true, config: { remoteMirakurunHost: "empty-source" }, getRemotePrograms: async () => [] }
+        ]), /No valid remote EPG/);
+        assert.deepEqual(await request("/programs"), [current]);
+        assert.deepEqual(await request(`/programs/${current.id}`), current);
         store.set(current.id, { startAt: NaN, name: "must not replace valid data" });
         store.add({ ...program(3), duration: -1 });
         store.findByNetworkIdAndReplace(1, [{ ...current, isFree: undefined }]);

@@ -388,7 +388,7 @@ export class Channel {
                 fn: async ({ signal }) => {
                     log.info("Network#%d EPG gathering has started", networkId);
                     try {
-                        await _.tuner.getEPG(service.channel, undefined, signal);
+                        await _.tuner.getEPG(service.channel, undefined, signal, networkId);
                         log.info("Network#%d EPG gathering has finished", networkId);
                     } catch (e) {
                         log.warn("Network#%d EPG gathering has failed [%s]", networkId, e);
@@ -442,7 +442,7 @@ export class Channel {
                     running = true;
                     log.info("Network#%d Service#%d EPG gathering has started", networkId, service.id);
                     try {
-                        await _.tuner.getEPG(service.channel, undefined, signal);
+                        await _.tuner.getEPG(service.channel, undefined, signal, networkId);
                         log.info("Network#%d Service#%d EPG gathering has finished", networkId, service.id);
                     } catch (e) {
                         log.warn("Network#%d Service#%d EPG gathering has failed [%s]", networkId, service.id, e);

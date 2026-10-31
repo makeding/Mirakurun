@@ -61,6 +61,7 @@ interface User extends common.User {
 
 interface StartStreamOptions {
     suppressGroupCombine?: boolean;
+    ignoreFailureCooldown?: boolean;
 }
 
 export interface TunerDeviceStatus {
@@ -241,14 +242,14 @@ export default class TunerDevice extends EventEmitter {
         return true;
     }
 
-    canStartStream(channel?: ChannelItem, ignoreAvailability = false): boolean {
+    canStartStream(channel?: ChannelItem, ignoreAvailability = false, ignoreFailureCooldown = false): boolean {
         if (ignoreAvailability === false && this._isAvailable === false) {
             return false;
         }
         if (channel && this._canUseChannel(channel) === false) {
             return false;
         }
-        if (this._cooldownUntil > Date.now()) {
+        if (!ignoreFailureCooldown && this._cooldownUntil > Date.now()) {
             if (this._lastCooldownLogUntil !== this._cooldownUntil) {
                 log.warn(
                     "TunerDevice#%d skipped because it is cooling down for %.1f more seconds",
@@ -306,7 +307,7 @@ export default class TunerDevice extends EventEmitter {
 
             if (this._stream) {
                 if (channel.channel !== this._channel.channel) {
-                    if (this.canStartStream(channel) === false) {
+                    if (this.canStartStream(channel, false, options?.ignoreFailureCooldown) === false) {
                         throw new Error(util.format("TunerDevice#%d device path is not available", this._index));
                     }
                     if (user.priority <= this.getPriority()) {
@@ -331,7 +332,7 @@ export default class TunerDevice extends EventEmitter {
                     waitForStream = true;
                 }
             } else {
-                if (this.canStartStream(channel) === false) {
+                if (this.canStartStream(channel, false, options?.ignoreFailureCooldown) === false) {
                     throw new Error(util.format("TunerDevice#%d device path is not available", this._index));
                 }
                 this._spawn(channel, user.disableMMTSDecoder === true, options, user.outputFormat, user.disableDecoder === true);
@@ -524,7 +525,8 @@ export default class TunerDevice extends EventEmitter {
 
         log.debug("TunerDevice#%d fetching remote programs from %s:%d...", this._index, client.host, client.port);
 
-        const programs = await client.getPrograms(query);
+        const response = await client.request("GET", "/programs", { query, signal: AbortSignal.timeout(10000) });
+        const programs = response.body as apid.Program[];
 
         log.info("TunerDevice#%d fetched %d remote programs", this._index, programs.length);
 

@@ -39,6 +39,14 @@ Validation covers startup migration, immediate mutations, ordering, filtering,
 Unicode response lengths, concurrent HTTP requests, and unavailable storage.
 Local fixtures do not establish production-data or physical-tuner acceptance.
 
+EPG jobs pass their target network identity through to acquisition. A channel
+number or the first service on a shared route cannot substitute for that identity:
+different reception sites can use the same terrestrial frequency for different
+networks. Remote EPG acquisition tries each eligible endpoint once and only
+publishes a nonempty, valid result belonging entirely to the requested network.
+Empty, malformed or mismatched responses fail acquisition and preserve the last
+valid schedule; normal expiry still removes ended programs from current queries.
+
 Expired occurrences (three hours after end, or 24 hours for unknown duration)
 remain archived when observed again. Repeated observation must not restore them
 or append unchanged archive revisions. Startup removes expired current entries

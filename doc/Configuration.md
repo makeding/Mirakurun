@@ -130,6 +130,17 @@ the reception group unhealthy. Existing streams still delivering data can be
 shared. After cooldown, only one acquisition probes the failed group; other
 requests keep using alternatives until 30 seconds of continuous input confirms
 recovery. Group failover respects channel restrictions and local-only requests.
+If the probing tuner is released before this validation completes, its probe
+lease and timer are retired with that tuner release. A normal channel change
+does not keep idle tuners unavailable for the remainder of the validation
+window, and it does not count as a new reception failure.
+For foreground viewing, failure cooldown and recovery observation are soft
+preferences: try all eligible healthy routes first, then allow an otherwise
+usable tuner when those preferences would leave no candidate. This follows
+actual available capacity rather than a configured tuner-count threshold.
+Each tuner/channel is attempted at most once per acquisition request. Device
+release, exclusive frontend leases, channel restrictions and user priorities
+still apply. Background jobs continue to respect failure cooldowns.
 It requires another group that can receive the requested channel and format;
 a BS-only backup cannot receive BS4K.
 

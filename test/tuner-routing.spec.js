@@ -1,6 +1,7 @@
 const assert = require("node:assert/strict");
 const { test } = require("node:test");
 const { PassThrough } = require("node:stream");
+const { EventEmitter } = require("node:events");
 
 const statusPath = require.resolve("../lib/Mirakurun/status");
 require.cache[statusPath] = {
@@ -27,7 +28,7 @@ function packet() {
 }
 
 function device(index, name, startStream) {
-    return {
+    return Object.assign(new EventEmitter(), {
         index,
         isRemote: false,
         isAvailable: true,
@@ -42,7 +43,7 @@ function device(index, name, startStream) {
         canStartStream() { return true; },
         getPriority() { return 0; },
         startStream
-    };
+    });
 }
 
 function tuner(devices) {
@@ -174,4 +175,77 @@ test("one failed satellite slot skips its whole reception group on this request 
     const next = await value.initChannelStream(otherChannel, user(), new PassThrough());
     assert.deepEqual(started, ["roof-1", "backup", "backup"]);
     first.close(); next.close();
+});
+
+test("foreground uses the only eligible tuner despite reception and device cooldowns", async () => {
+    const selected = channel("SAT");
+    let starts = 0;
+    let options;
+    const receiver = device(0, "only", async (_user, stream, _channel, _recover, startOptions) => {
+        ++starts; options = startOptions; stream.write(packet());
+    });
+    receiver.canStartStream = (_channel, _recover, ignoreCooldown) => ignoreCooldown === true;
+    const value = tuner([receiver]);
+    value._markSourceFailure(receiver, value._getGroupKey(receiver, selected));
+    value._markChannelFailure(receiver, selected);
+    const filter = await value.initChannelStream(selected, user(), new PassThrough());
+    assert.equal(starts, 1);
+    assert.equal(options.ignoreFailureCooldown, true);
+    filter.close();receiver.emit("release");
+});
+
+test("foreground retries a sibling when a failed group is the only reception path", async () => {
+    const selected = channel("SAT");
+    const started = [];
+    const first = device(0, "first", async () => {
+        started.push("first");throw new TunerStartupError("no data", "channel");
+    });
+    const second = device(1, "second", async (_user, stream) => {
+        started.push("second");stream.write(packet());
+    });
+    const value = tuner([first, second]);
+    const filter = await value.initChannelStream(selected, user(), new PassThrough());
+    assert.deepEqual(started, ["first", "second"]);
+    filter.close();second.emit("release");
+});
+
+test("one acquisition cannot loop on a failing last tuner", async () => {
+    const selected = channel("SAT");
+    let starts = 0;
+    const value = tuner([device(0, "only", async () => {
+        ++starts;throw new TunerStartupError("no data", "channel");
+    })]);
+    await assert.rejects(value.initChannelStream(selected, user(), new PassThrough()), /startup attempts failed/);
+    assert.equal(starts, 1);
+});
+
+test("tuner release retires its recovery probe before the observation window ends", () => {
+    const selected = channel("SAT");
+    const receiver = device(0, "only", async () => {});
+    const value = tuner([receiver]);
+    const key = value._getGroupKey(receiver, selected);
+    value._markSourceFailure(receiver, key);
+    value._sourceFailureState.get(key).retryAt = 0;
+    assert.equal(value._beginSourceProbe(receiver, selected), true);
+    value._validateSourceRecovery(receiver, selected);
+    assert.equal(value._isSourceFailureCoolingDown(receiver, selected), true);
+    assert.equal(receiver.listenerCount("release"), 1);
+    receiver.emit("release");
+    const state = value._sourceFailureState.get(key);
+    assert.equal(state.probing, false);
+    assert.equal(state.timer, undefined);
+    assert.equal(receiver.listenerCount("release"), 0);
+    assert.equal(value._isSourceFailureCoolingDown(receiver, selected), false);
+});
+
+test("scarcity does not bypass a frontend lease or preempt an equal-priority viewer", () => {
+    const selected = channel("SAT");
+    const leased = device(0, "leased", async () => {});
+    leased.canStartStream = () => false;
+    const occupied = device(1, "occupied", async () => {});
+    occupied.isFree = false;occupied.isUsing = true;occupied.users = [{ priority: 0 }];
+    occupied.channel = channel("CATV");
+    const value = tuner([leased, occupied]);
+    assert.equal(value._pickTunerDevice([leased, occupied], selected, 0,
+        false, true, false, undefined, true), null);
 });
