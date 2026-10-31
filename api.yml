@@ -857,6 +857,7 @@ definitions:
         type: string
       cooldownSeconds:
         type: integer
+        description: Seconds to deprioritize a failed tuner within one acquisition session only.
       remoteMirakurunHost:
         type: string
       remoteMirakurunPort:

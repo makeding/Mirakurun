@@ -438,7 +438,7 @@ export interface ConfigTunersItem {
     dvbDevicePath?: string;
     /** Optional device path checked before starting this tuner. Falls back to dvbDevicePath when omitted. */
     checkDevicePath?: string;
-    /** Seconds to skip this tuner after its command exits with failure. */
+    /** Seconds to deprioritize a failed tuner within one acquisition session only. */
     cooldownSeconds?: number;
     /** [remote] specify to use remote Mirakurun host like as `192.168.1.x`. */
     remoteMirakurunHost?: string;

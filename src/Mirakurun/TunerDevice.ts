@@ -33,7 +33,6 @@ import Client, { ProgramsQuery } from "../client";
 import { REMOTE_EXIT_CHANNEL_UNAVAILABLE } from "../remoteExitCodes";
 import { TSHandoffBuffer, TSHandoffOptions, TSHandoffProbe } from "./TSHandoff";
 
-const DEFAULT_FAILURE_COOLDOWN_SECONDS = 2;
 const STREAM_START_TIMEOUT_MS = 5000;
 
 export type TunerStartupFailureScope = "channel" | "source";
@@ -61,7 +60,6 @@ interface User extends common.User {
 
 interface StartStreamOptions {
     suppressGroupCombine?: boolean;
-    ignoreFailureCooldown?: boolean;
 }
 
 export interface TunerDeviceStatus {
@@ -99,8 +97,6 @@ export default class TunerDevice extends EventEmitter {
     private _exited = false;
     private _closing = false;
     private _lastDevicePathReady: boolean = null;
-    private _cooldownUntil = 0;
-    private _lastCooldownLogUntil = 0;
     private _lastDataAt = 0;
     private _spawnedAt = 0;
     private _sourceWatchdog?: NodeJS.Timeout;
@@ -242,21 +238,11 @@ export default class TunerDevice extends EventEmitter {
         return true;
     }
 
-    canStartStream(channel?: ChannelItem, ignoreAvailability = false, ignoreFailureCooldown = false): boolean {
+    canStartStream(channel?: ChannelItem, ignoreAvailability = false): boolean {
         if (ignoreAvailability === false && this._isAvailable === false) {
             return false;
         }
         if (channel && this._canUseChannel(channel) === false) {
-            return false;
-        }
-        if (!ignoreFailureCooldown && this._cooldownUntil > Date.now()) {
-            if (this._lastCooldownLogUntil !== this._cooldownUntil) {
-                log.warn(
-                    "TunerDevice#%d skipped because it is cooling down for %.1f more seconds",
-                    this._index, (this._cooldownUntil - Date.now()) / 1000
-                );
-                this._lastCooldownLogUntil = this._cooldownUntil;
-            }
             return false;
         }
 
@@ -307,7 +293,7 @@ export default class TunerDevice extends EventEmitter {
 
             if (this._stream) {
                 if (channel.channel !== this._channel.channel) {
-                    if (this.canStartStream(channel, false, options?.ignoreFailureCooldown) === false) {
+                    if (this.canStartStream(channel) === false) {
                         throw new Error(util.format("TunerDevice#%d device path is not available", this._index));
                     }
                     if (user.priority <= this.getPriority()) {
@@ -332,7 +318,7 @@ export default class TunerDevice extends EventEmitter {
                     waitForStream = true;
                 }
             } else {
-                if (this.canStartStream(channel, false, options?.ignoreFailureCooldown) === false) {
+                if (this.canStartStream(channel) === false) {
                     throw new Error(util.format("TunerDevice#%d device path is not available", this._index));
                 }
                 this._spawn(channel, user.disableMMTSDecoder === true, options, user.outputFormat, user.disableDecoder === true);
@@ -663,7 +649,6 @@ export default class TunerDevice extends EventEmitter {
             );
 
             this._commandFailed = this._commandFailed || code !== 0 || signal !== null;
-            this._startCooldownIfNeeded(code, signal);
             this._end();
             setTimeout(this._release.bind(this), this._config.dvbDevicePath ? 1000 : 100);
         });
@@ -892,7 +877,7 @@ export default class TunerDevice extends EventEmitter {
                 Date.now() - Math.max(this._lastDataAt, this._spawnedAt) < STREAM_START_TIMEOUT_MS) { return; }
             clearInterval(this._sourceWatchdog);
             this._sourceWatchdog = undefined;
-            log.warn("TunerDevice#%d source stopped sending data; releasing users for group failover", this._index);
+            log.warn("TunerDevice#%d source stopped sending data; releasing users for a new acquisition session", this._index);
             this.emit("streamFailure", this._channel);
             this.kill().catch(log.error);
         }, 1000);
@@ -916,22 +901,6 @@ export default class TunerDevice extends EventEmitter {
         }
 
         return ready;
-    }
-
-    private _startCooldownIfNeeded(code: number, signal: NodeJS.Signals | null): void {
-        const cooldownSeconds = this._config.cooldownSeconds ?? DEFAULT_FAILURE_COOLDOWN_SECONDS;
-        if (this._closing === true || cooldownSeconds <= 0) {
-            return;
-        }
-        if (code === 0 && signal === null) {
-            return;
-        }
-
-        this._cooldownUntil = Date.now() + cooldownSeconds * 1000;
-        log.warn(
-            "TunerDevice#%d cooling down for %d seconds after command failure",
-            this._index, cooldownSeconds
-        );
     }
 
     private _end(): void {

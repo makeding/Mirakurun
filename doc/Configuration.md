@@ -123,30 +123,25 @@ Without a name, local tuners share a group per delivery route (`SAT`, `TER`,
 `CATV`, `HIKARI`); remote tuners share a group per host, port and delivery route.
 Local paths retain their normal preference over remote paths.
 
-If one tuner fails acquisition or stops producing source bytes, new acquisitions
-skip its reception group for 30 seconds and try the next eligible group. A busy
-tuner, client cancellation, preemption or decoder/output failure does not mark
-the reception group unhealthy. Existing streams still delivering data can be
-shared. After cooldown, only one acquisition probes the failed group; other
-requests keep using alternatives until 30 seconds of continuous input confirms
-recovery. Group failover respects channel restrictions and local-only requests.
-If the probing tuner is released before this validation completes, its probe
-lease and timer are retired with that tuner release. A normal channel change
-does not keep idle tuners unavailable for the remainder of the validation
-window, and it does not count as a new reception failure.
-For foreground viewing, failure cooldown and recovery observation are soft
-preferences: try all eligible healthy routes first, then allow an otherwise
-usable tuner when those preferences would leave no candidate. This follows
-actual available capacity rather than a configured tuner-count threshold.
-Each tuner/channel is attempted at most once per acquisition request. Device
-release, exclusive frontend leases, channel restrictions and user priorities
-still apply. Background jobs continue to respect failure cooldowns.
-It requires another group that can receive the requested channel and format;
-a BS-only backup cannot receive BS4K.
+Failure avoidance belongs to one acquisition session: one live/recording/EPG/service
+request, including all of its startup retries and any rebalance attempts.
+Each tuner/channel is attempted at most once in that session. After failure,
+prefer another reception group or remote endpoint; if all remaining sources
+have failed in this session, try their other eligible slots instead of leaving
+usable capacity idle. Foreground and background requests use the same rules.
+
+A new request starts with no failure history. Concurrent requests, other
+channels and EPG jobs never inherit another session's reception failures,
+command cooldown or recovery probes. There is no global reception cooldown or
+half-open validation window. Device release, exclusive frontend leases, channel
+restrictions, local-only requests, stream sharing and user priorities remain
+shared resource constraints. A compatible existing stream can still be reused.
+A backup must support the requested channel and format; a BS-only backup cannot
+receive BS4K.
 
 Both local and remote acquisitions wait up to five seconds for source data.
 An active source that sends no data for five seconds is released and its users
-are ended so consumers can reconnect through another group. This is source
+are ended so consumers can start a fresh acquisition session. This is source
 availability detection, not a guarantee of seamless switching or RF quality
 measurement while bytes continue arriving.
 
@@ -192,7 +187,7 @@ Specify a device path that must exist before this tuner can be started. If the p
 
 #### cooldownSeconds
 
-Specify seconds to skip this tuner after its command exits with failure. When omitted, it defaults to `2`. Set `0` to disable cooldown.
+Specify how long to deprioritize a failed tuner within the current acquisition session. The default is `2` seconds; `0` disables this extra device preference. This never blocks another session or prevents trying the remaining eligible candidates.
 
 #### remoteMirakurunAllowNested
 

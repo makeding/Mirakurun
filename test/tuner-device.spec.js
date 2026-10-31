@@ -28,8 +28,6 @@ const Tuner = require("../lib/Mirakurun/Tuner").default;
 
 function createTuner() {
     const tuner = Object.create(Tuner.prototype);
-    tuner._sourceFailureState = new Map();
-    tuner._channelFailureUntil = new Map();
     return tuner;
 }
 
@@ -260,121 +258,7 @@ describe("[tuner-device.spec] failed command release", () => {
     });
 });
 
-describe("[tuner-device.spec] remote source circuit breaker", () => {
-    it("groups tuner devices from the same remote source", () => {
-        const tuner = createTuner();
-        tuner._sourceFailureState = new Map();
-
-        const first = {
-            index: 10,
-            isRemote: true,
-            config: {
-                remoteMirakurunHost: "10.77.0.1",
-                remoteMirakurunPort: 40772
-            }
-        };
-        const second = {
-            index: 11,
-            isRemote: true,
-            config: {
-                remoteMirakurunHost: "10.77.0.1",
-                remoteMirakurunPort: 40772
-            }
-        };
-
-        tuner._markSourceFailure(first);
-
-        assert.strictEqual(tuner._isSourceFailureCoolingDown(second), true);
-    });
-
-    it("allows only one half-open probe after the source cooldown", () => {
-        const tuner = createTuner();
-        tuner._sourceFailureState = new Map();
-        const channel = createChannel();
-        const device = {
-            index: 10,
-            isRemote: true,
-            config: {
-                remoteMirakurunHost: "10.77.0.1",
-                remoteMirakurunPort: 40772
-            }
-        };
-
-        tuner._markSourceFailure(device);
-        const state = tuner._sourceFailureState.get("10.77.0.1:40772");
-        state.retryAt = Date.now() - 1;
-
-        assert.strictEqual(tuner._beginSourceProbe(device, channel), true);
-        assert.strictEqual(tuner._beginSourceProbe(device, channel), false);
-        assert.strictEqual(tuner._isSourceFailureCoolingDown(device), true);
-    });
-
-    it("recovers the remote source after a stable probe", () => {
-        const tuner = createTuner();
-        tuner._sourceFailureState = new Map();
-        const channel = createChannel();
-        const device = {
-            index: 10,
-            isRemote: true,
-            isUsing: true,
-            channel,
-            lastDataAt: Date.now(),
-            config: {
-                remoteMirakurunHost: "10.77.0.1",
-                remoteMirakurunPort: 40772
-            }
-        };
-        tuner._sourceFailureState.set("10.77.0.1:40772", {
-            retryAt: 0,
-            probing: true,
-            generation: 3,
-            probeDeviceIndex: 10,
-            probeChannelKey: "GR-ALT:27"
-        });
-
-        tuner._completeSourceRecoveryProbe(device, channel, "10.77.0.1:40772", 3);
-
-        assert.strictEqual(tuner._sourceFailureState.has("10.77.0.1:40772"), false);
-    });
-
-    it("reopens the circuit when the probe stops producing data", async () => {
-        const tuner = createTuner();
-        tuner._sourceFailureState = new Map();
-        const channel = createChannel();
-        let killed = false;
-        const device = {
-            index: 10,
-            isRemote: true,
-            isUsing: true,
-            channel,
-            lastDataAt: 0,
-            config: {
-                remoteMirakurunHost: "10.77.0.1",
-                remoteMirakurunPort: 40772
-            },
-            kill: async () => {
-                killed = true;
-            }
-        };
-        tuner._sourceFailureState.set("10.77.0.1:40772", {
-            retryAt: 0,
-            probing: true,
-            generation: 3,
-            probeDeviceIndex: 10,
-            probeChannelKey: "GR-ALT:27"
-        });
-
-        tuner._completeSourceRecoveryProbe(device, channel, "10.77.0.1:40772", 3);
-        await new Promise(resolve => setImmediate(resolve));
-
-        const state = tuner._sourceFailureState.get("10.77.0.1:40772");
-        assert.strictEqual(state.probing, false);
-        assert.ok(state.retryAt > Date.now());
-        assert.strictEqual(killed, true);
-    });
-});
-
-describe("[tuner-device.spec] reception group failover", () => {
+describe("[tuner-device.spec] reception resource selection", () => {
     const satellite = type => new ChannelItem({ name: type, type, channel: "BS15_0" });
     const local = (index, group) => {
         const device = createPickDevice({ index, isRemote: false, free: true });
@@ -382,68 +266,11 @@ describe("[tuner-device.spec] reception group failover", () => {
         return device;
     };
 
-    it("skips all local satellite slots after one failure, across BS/CS/BS4K but not terrestrial", () => {
-        const tuner = createTuner();
-        const first = local(0), second = local(1), backup = local(2, "other-site");
-        tuner._handleStreamFailure(first, satellite("BS"));
-        for (const type of ["BS", "CS", "BS4K"]) {
-            assert.equal(tuner._pickTunerDevice([first, second, backup], satellite(type), 0), backup);
-        }
-        const terrestrial = new ChannelItem({ name: "GR", type: "GR", channel: "27" });
-        assert.equal(tuner._pickTunerDevice([first, second], terrestrial, 0), first);
-    });
-
     it("uses another free slot in a busy group without marking a reception failure", () => {
         const tuner = createTuner();
         const first = local(0), second = local(1), backup = local(2, "other-site");
         first.isFree = false; first.isUsing = true; first.users = [{ priority: 0 }];
         assert.equal(tuner._pickTunerDevice([first, second, backup], satellite("BS"), 0), second);
-        assert.equal(tuner._sourceFailureState.size, 0);
-    });
-
-    it("permits one recovery acquisition and prevents another slot from releasing its probe", () => {
-        const tuner = createTuner();
-        const channel = satellite("BS");
-        const first = local(0, "roof"), second = local(1, "roof"), backup = local(2, "other-site");
-        tuner._handleStreamFailure(first, channel);
-        const key = tuner._getGroupKey(first, channel);
-        const state = tuner._sourceFailureState.get(key);
-        state.retryAt = 0;
-        assert.equal(tuner._beginSourceProbe(first, channel), true);
-        assert.equal(tuner._beginSourceProbe(second, channel), false);
-        assert.equal(tuner._pickTunerDevice([second, backup], satellite("CS"), 0), backup);
-        tuner._releaseSourceProbe(second, channel);
-        assert.equal(state.probing, true);
-        first.isUsing = true; first.channel = channel; first.lastDataAt = Date.now();
-        tuner._completeSourceRecoveryProbe(first, channel, key, state.generation);
-        assert.equal(tuner._sourceFailureState.has(key), false);
-        assert.equal(tuner._pickTunerDevice([second, backup], satellite("BS4K"), 0), second);
-    });
-
-    it("shares a still healthy stream in a failed group, and rejects stale stream reuse", () => {
-        const tuner = createTuner();
-        const channel = satellite("BS");
-        const first = local(0), second = local(1), backup = local(2, "other-site");
-        tuner._handleStreamFailure(first, channel);
-        second.isUsing = true; second.lastDataAt = Date.now(); second.canReuseStream = () => true;
-        assert.equal(tuner._pickTunerDevice([second, backup], channel, 0), second);
-        second.lastDataAt = Date.now() - 6000;
-        assert.equal(tuner._pickTunerDevice([second, backup], channel, 0), backup);
-    });
-
-    it("allows background jobs to use a remote group when local reception has failed", async t => {
-        const tuner = createTuner();
-        const channel = satellite("BS");
-        const first = local(0), second = local(1), backup = local(2);
-        backup.isRemote = true; backup.config.remoteMirakurunHost = "other-site";
-        tuner._devices = [first, second, backup];
-        tuner._readyForJobPickedDeviceSet = new Set();
-        tuner._handleStreamFailure(first, channel);
-        const original = global.setTimeout;
-        global.setTimeout = (...args) => original(...args).unref();
-        try { assert.equal(await tuner.readyForJob(channel), true); }
-        finally { global.setTimeout = original; }
-        assert.deepEqual([...tuner._readyForJobPickedDeviceSet], [backup]);
     });
 
     it("skips sibling targets when a handoff acquisition fails in their group", async t => {
@@ -459,11 +286,11 @@ describe("[tuner-device.spec] reception group failover", () => {
         const attempted = [];
         source.handoffAllUsersTo = async target => {
             attempted.push(target);
-            if (target === first) { tuner._handleStreamFailure(target, playing, new TunerStartupError("no signal", "source")); return false; }
+            if (target === first) { return false; }
             return true;
         };
         tuner._devices = [source, first, sibling, backup];
-        tuner._readyForJobPickedDeviceSet = new Set(); tuner._handoffFailureUntil = new Map();
+        tuner._readyForJobPickedDeviceSet = new Set();
         assert.equal(await tuner._rebalanceForChannel(requested, 0), true);
         assert.deepEqual(attempted, [first, backup]);
     });
@@ -654,11 +481,11 @@ describe("[tuner-device.spec] background jobs during streaming", () => {
         });
     });
 
-    it("does not fall back to remote tuners when a local tuner is merely cooling down", async () => {
+    it("uses remote capacity when a local device cannot currently start", async () => {
         const tuner = createTuner();
         tuner._readyForJobPickedDeviceSet = new Set();
         const channel = createChannel();
-        const localCooldown = {
+        const localUnavailable = {
             index: 0,
             isRemote: false,
             isAvailable: true,
@@ -672,20 +499,10 @@ describe("[tuner-device.spec] background jobs during streaming", () => {
             config: { name: "LOCAL-GR-1", types: ["GR-ALT"] }
         };
         const remote = createPickDevice({ index: 1, isRemote: true, free: true });
-        tuner._devices = [localCooldown, remote];
+        tuner._devices = [localUnavailable, remote];
 
-        const originalSleep = common.sleep;
-        common.sleep = async () => {
-            common.sleep = originalSleep;
-            throw new Error("loop-stop");
-        };
-
-        return tuner.readyForJob(channel).then(() => {
-            throw new Error("should not resolve");
-        }, err => {
-            assert.strictEqual(err.message, "loop-stop");
-            common.sleep = originalSleep;
-        });
+        assert.strictEqual(await tuner.readyForJob(channel), true);
+        assert.strictEqual(tuner._readyForJobPickedDeviceSet.has(remote), true);
     });
 });
 

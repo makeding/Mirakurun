@@ -25,6 +25,7 @@ import ServiceItem from "./ServiceItem";
 import StreamFilter from "./StreamFilter";
 import { TSHandoffOptions } from "./TSHandoff";
 import { programValidationError } from "./ProgramValidation";
+import TunerSession, { getSourceKey } from "./TunerSession";
 
 export interface RemoteServiceSource {
     tunerNames: string[];
@@ -36,27 +37,9 @@ export interface RemoteServicesResult {
     failedSourceCount: number;
 }
 
-const CHANNEL_FAILURE_COOLDOWN_MS = 30000;
-const SOURCE_FAILURE_COOLDOWN_MS = 30000;
-const SOURCE_RECOVERY_STABLE_MS = 30000;
-const SOURCE_RECOVERY_MAX_DATA_GAP_MS = 5000;
-
-interface SourceFailureState {
-    retryAt: number;
-    probing: boolean;
-    generation: number;
-    probeDeviceIndex?: number;
-    probeChannelKey?: string;
-    timer?: NodeJS.Timeout;
-    cleanup?: () => void;
-}
-
 export class Tuner {
     private _devices: TunerDevice[] = [];
     private _readyForJobPickedDeviceSet: Set<TunerDevice> = new Set();
-    private _handoffFailureUntil = new Map<string, number>();
-    private _channelFailureUntil = new Map<string, number>();
-    private _sourceFailureState = new Map<string, SourceFailureState>();
 
     constructor() {
         this._load();
@@ -108,8 +91,7 @@ export class Tuner {
                 device = this._pickTunerDevice(localPickable, channel, -1);
             }
             if (device === null && remotePickable.length > 0 && localDevices.every(d =>
-                d.isFree === false || this._isSourceFailureCoolingDown(d, channel) ||
-                this._isChannelFailureCoolingDown(d, channel))) {
+                d.isFree === false || !d.canStartStream(channel))) {
                 device = this._pickTunerDevice(remotePickable, channel, -1);
                 if (device !== null) {
                     log.info(
@@ -580,7 +562,6 @@ export class Tuner {
                 log.warn("tuner#%s has no usable DVB frontend: check driver capabilities, device permissions and adapter reservations; restart after fixing discovery", i);
             }
             const device = new TunerDevice(i, tuner, dvbPool);
-            device.on("streamFailure", (channel: ChannelItem, error?: TunerStartupError) => this._handleStreamFailure(device, channel, error));
             this._devices.push(device);
         });
 
@@ -603,9 +584,7 @@ export class Tuner {
         const recoverUnavailableTuners = user.priority >= 0 && devices.length > 0 && devices.every(device => device.isAvailable === false);
         let tryCount = 50;
         let handoffTried = false;
-        const attempted = new Set<string>();
-        const attemptKey = (candidate: TunerDevice, channel: ChannelItem) =>
-            `${candidate.index}:${this._getProbeChannelKey(channel)}`;
+        const session = new TunerSession();
 
         if (!dest) {
             const remoteResult = await this._useRemoteData(user, devices);
@@ -618,18 +597,19 @@ export class Tuner {
             const disableDecoder = user.disableDecoder === true;
             const disableMMTSDecoder = user.disableMMTSDecoder === true;
             let device: TunerDevice = null;
-            let ignoreFailures = false;
             // Prefer a local path across all routes before using remote capacity.
-            for (const retryFailures of user.priority >= 0 ? [false, true] : [false]) {
+            for (const rank of [0, 1, 2]) {
                 for (const remote of [false, true]) {
                     for (const route of routes) {
                         const candidates = route.devices.filter(candidate => candidate.isRemote === remote &&
-                            !attempted.has(attemptKey(candidate, route.channel)));
+                            !session.hasAttempted(candidate, route.channel) &&
+                            session.rank(candidate, route.channel, candidate.isUsing &&
+                                Date.now() - candidate.lastDataAt <= 5000 &&
+                                candidate.canReuseStream(route.channel, disableDecoder, disableMMTSDecoder, user.outputFormat)) === rank);
                         device = this._pickTunerDevice(candidates, route.channel, user.priority,
-                            disableDecoder, disableMMTSDecoder, recoverUnavailableTuners, user.outputFormat, retryFailures);
+                            disableDecoder, disableMMTSDecoder, recoverUnavailableTuners, user.outputFormat);
                         if (device) {
                             setting.channel = route.channel;
-                            ignoreFailures = retryFailures;
                             break;
                         }
                     }
@@ -640,10 +620,10 @@ export class Tuner {
 
             if (device === null) {
                 if (devices.length > 0 && routes.every(route =>
-                    route.devices.every(candidate => attempted.has(attemptKey(candidate, route.channel))))) {
+                    route.devices.every(candidate => session.hasAttempted(candidate, route.channel)))) {
                     throw new Error("all eligible tuner startup attempts failed");
                 }
-                if (handoffTried === false && await this._rebalanceForChannel(setting.channel, user.priority)) {
+                if (handoffTried === false && await this._rebalanceForChannel(setting.channel, user.priority, session)) {
                     handoffTried = true;
                     continue;
                 }
@@ -698,10 +678,8 @@ export class Tuner {
                     configurable: true
                 });
 
-                const sourceProbe = this._beginSourceProbe(device, setting.channel, ignoreFailures);
                 try {
-                    await device.startStream(user, tsFilter, setting.channel, recoverUnavailableTuners,
-                        { ignoreFailureCooldown: ignoreFailures });
+                    await device.startStream(user, tsFilter, setting.channel, recoverUnavailableTuners);
                     if (dest) {
                         const onClose = () => { output.destroy(); tsFilter.close(); };
                         dest.once("close", onClose);
@@ -713,23 +691,12 @@ export class Tuner {
                             }
                         });
                     }
-                    this._clearChannelFailure(device, setting.channel);
-                    if (sourceProbe === true) {
-                        this._validateSourceRecovery(device, setting.channel);
-                    }
                     return tsFilter;
                 } catch (err) {
                     output?.destroy();
                     tsFilter.end();
                     if (err instanceof TunerStartupError) {
-                        attempted.add(attemptKey(device, setting.channel));
-                        if (err.failureScope === "source") {
-                            this._markSourceFailure(device);
-                        } else {
-                            this._markChannelFailure(device, setting.channel);
-                        }
-                        this._markSourceFailure(device, this._getGroupKey(device, setting.channel));
-                        if (sourceProbe === true) { this._releaseSourceProbe(device, setting.channel); }
+                        session.fail(device, setting.channel, err.failureScope);
                         log.warn(
                             "TunerDevice#%d failed to start `%s`; retrying with a different tuner [%s]",
                             device.index,
@@ -737,9 +704,6 @@ export class Tuner {
                             err.message
                         );
                         continue;
-                    }
-                    if (sourceProbe === true) {
-                        this._releaseSourceProbe(device, setting.channel);
                     }
                     throw err;
                 }
@@ -758,7 +722,7 @@ export class Tuner {
         if (this._isRemoteOnly(devices) && setting.networkId !== undefined && setting.parseEIT === true) {
             const tried = new Set<string>();
             for (const device of devices) {
-                const source = this._getSourceKey(device);
+                const source = getSourceKey(device);
                 if (tried.has(source)) { continue; }
                 tried.add(source);
                 let programs: apid.Program[];
@@ -812,16 +776,8 @@ export class Tuner {
         disableDecoder = false,
         disableMMTSDecoder = disableDecoder,
         recoverUnavailableTuners = false,
-        outputFormat?: apid.StreamFormat,
-        ignoreFailures = false
+        outputFormat?: apid.StreamFormat
     ): TunerDevice | null {
-        devices = devices.filter(device => {
-            const healthySharedStream = device.isUsing === true &&
-                Date.now() - device.lastDataAt <= SOURCE_RECOVERY_MAX_DATA_GAP_MS &&
-                device.canReuseStream(channel, disableDecoder, disableMMTSDecoder, outputFormat);
-            return healthySharedStream || ignoreFailures || (!this._isSourceFailureCoolingDown(device, channel) &&
-                !this._isChannelFailureCoolingDown(device, channel));
-        });
         const localDevices = devices.filter(device => device.isRemote === false);
         const remoteDevices = devices.filter(device => device.isRemote === true);
 
@@ -834,14 +790,14 @@ export class Tuner {
 
         // 2. start as new on local tuners
         for (const device of localDevices) {
-            if (device.isFree === true && device.canStartStream(channel, false, ignoreFailures) === true) {
+            if (device.isFree === true && device.canStartStream(channel) === true) {
                 return device;
             }
         }
 
         // 3. replace existing on local tuners
         for (const device of localDevices) {
-            if (device.isAvailable === true && device.users.length === 0 && device.canStartStream(channel, false, ignoreFailures) === true) {
+            if (device.isAvailable === true && device.users.length === 0 && device.canStartStream(channel) === true) {
                 return device;
             }
         }
@@ -853,7 +809,7 @@ export class Tuner {
                     device.channel !== channel &&
                     device.getPriority() < priority &&
                     device.users.every(user => user.priority < 0) === true &&
-                    device.canStartStream(channel, false, ignoreFailures) === true
+                    device.canStartStream(channel) === true
                 ) {
                     log.info(
                         "TunerDevice#%d is running a background job for `%s`; preempting it for foreground stream `%s`",
@@ -869,14 +825,14 @@ export class Tuner {
 
         // 5. start as new on remote tuners
         for (const device of remoteDevices) {
-            if (device.isFree === true && device.canStartStream(channel, false, ignoreFailures) === true) {
+            if (device.isFree === true && device.canStartStream(channel) === true) {
                 return device;
             }
         }
 
         // 6. replace existing on remote tuners
         for (const device of remoteDevices) {
-            if (device.isAvailable === true && device.users.length === 0 && device.canStartStream(channel, false, ignoreFailures) === true) {
+            if (device.isAvailable === true && device.users.length === 0 && device.canStartStream(channel) === true) {
                 return device;
             }
         }
@@ -885,7 +841,7 @@ export class Tuner {
         if (priority >= 0) {
             devices.sort((t1, t2) => t1.getPriority() - t2.getPriority());
             for (const device of devices) {
-                if (device.isUsing === true && device.getPriority() < priority && device.canStartStream(channel, false, ignoreFailures) === true) {
+                if (device.isUsing === true && device.getPriority() < priority && device.canStartStream(channel) === true) {
                     return device;
                 }
             }
@@ -897,7 +853,7 @@ export class Tuner {
         if (recoverUnavailableTuners === true) {
             devices.sort((t1, t2) => t1.getPriority() - t2.getPriority());
             for (const device of devices) {
-                if (device.getPriority() <= priority && device.canStartStream(channel, true, ignoreFailures) === true) {
+                if (device.getPriority() <= priority && device.canStartStream(channel, true) === true) {
                     return device;
                 }
             }
@@ -919,7 +875,7 @@ export class Tuner {
         }
     }
 
-    private async _rebalanceForChannel(channel: ChannelItem, priority: number): Promise<boolean> {
+    private async _rebalanceForChannel(channel: ChannelItem, priority: number, session = new TunerSession()): Promise<boolean> {
         const config = _.config.server.tunerHandoff;
 
         if (!config || config.enabled !== true) {
@@ -938,20 +894,12 @@ export class Tuner {
             }
 
             const moveTargets = this._getDevicesByChannel(blockingDevice.channel);
-            for (const moveTarget of moveTargets) {
-                if (moveTarget === blockingDevice || this._readyForJobPickedDeviceSet.has(moveTarget)) {
-                    continue;
-                }
-                if (this._isSourceFailureCoolingDown(moveTarget, blockingDevice.channel) ||
-                    this._isChannelFailureCoolingDown(moveTarget, blockingDevice.channel)) { continue; }
-                const handoffKey = this._getHandoffKey(blockingDevice, moveTarget, blockingDevice.channel);
-                const failureUntil = this._handoffFailureUntil.get(handoffKey) || 0;
-                if (failureUntil > Date.now()) {
-                    continue;
-                }
-                if (blockingDevice.canHandoffTo(moveTarget, priority) === false) {
-                    continue;
-                }
+            while (moveTargets.length > 0) {
+                moveTargets.sort((a, b) => session.rank(a, blockingDevice.channel) - session.rank(b, blockingDevice.channel));
+                const moveTarget = moveTargets.shift();
+                if (moveTarget === blockingDevice || this._readyForJobPickedDeviceSet.has(moveTarget) ||
+                    !session.beginHandoff(blockingDevice, moveTarget, blockingDevice.channel) ||
+                    blockingDevice.canHandoffTo(moveTarget, priority) === false) { continue; }
 
                 log.info(
                     "Tuner rebalance: moving `%s` from #%d to #%d to free tuner for `%s`",
@@ -960,28 +908,15 @@ export class Tuner {
                     moveTarget.index,
                     channel.name
                 );
-
                 const movedChannel = blockingDevice.channel;
-                const sourceProbe = this._beginSourceProbe(moveTarget, movedChannel);
                 if (await blockingDevice.handoffAllUsersTo(moveTarget, priority, handoffOptions)) {
-                    if (sourceProbe) { this._validateSourceRecovery(moveTarget, movedChannel); }
-                    this._handoffFailureUntil.delete(handoffKey);
                     return true;
                 }
-                if (sourceProbe) { this._releaseSourceProbe(moveTarget, movedChannel); }
-
-                this._handoffFailureUntil.set(
-                    handoffKey,
-                    Date.now() + Math.max(10000, handoffOptions.syncTimeoutMs)
-                );
+                session.fail(moveTarget, movedChannel, "channel");
             }
         }
 
         return false;
-    }
-
-    private _getHandoffKey(source: TunerDevice, target: TunerDevice, channel: ChannelItem): string {
-        return `${source.index}:${target.index}:${channel.type}:${channel.route}:${channel.channel}`;
     }
 
     private _getHandoffOptions(): TSHandoffOptions {
@@ -993,193 +928,6 @@ export class Tuner {
             switchMarginMs: config.switchMarginMs ?? 100,
             syncTimeoutMs: config.syncTimeoutMs ?? 5000
         };
-    }
-
-    private _getChannelFailureKey(device: TunerDevice, channel: ChannelItem): string {
-        return `${this._getSourceKey(device)}:${channel.type}:${channel.route}:${channel.channel}`;
-    }
-
-    private _getSourceKey(device: TunerDevice): string {
-        return device.isRemote
-            ? `${device.config.remoteMirakurunHost}:${device.config.remoteMirakurunPort || 40772}`
-            : `device:${device.index}`;
-    }
-
-    private _getGroupKey(device: TunerDevice, channel: ChannelItem): string {
-        return device.config.group !== undefined ? `group:${device.config.group}` :
-            `group:${device.isRemote ? this._getSourceKey(device) : "local"}:${channel.route}`;
-    }
-
-    private _getSourceKeys(device: TunerDevice, channel?: ChannelItem): string[] {
-        return [
-            ...(device.isRemote ? [this._getSourceKey(device)] : []),
-            ...(channel ? [this._getGroupKey(device, channel)] : [])
-        ];
-    }
-
-    private _getProbeChannelKey(channel: ChannelItem): string {
-        return `${channel.type}:${channel.route}:${channel.channel}`;
-    }
-
-    private _isSourceFailureCoolingDown(device: TunerDevice, channel?: ChannelItem): boolean {
-        return this._getSourceKeys(device, channel).some(key => {
-            const state = this._sourceFailureState.get(key);
-            return state && (state.probing === true || state.retryAt > Date.now());
-        });
-    }
-
-    private _beginSourceProbe(device: TunerDevice, channel: ChannelItem, ignoreCooldown = false): boolean {
-        let probing = false;
-        for (const key of this._getSourceKeys(device, channel)) {
-            const state = this._sourceFailureState.get(key);
-            if (!state || state.probing || (!ignoreCooldown && state.retryAt > Date.now())) { continue; }
-            state.probing = true;
-            state.generation++;
-            state.probeDeviceIndex = device.index;
-            state.probeChannelKey = this._getProbeChannelKey(channel);
-            log.warn("Tuner source %s is half-open; TunerDevice#%d will probe `%s`", key, device.index, channel.name);
-            probing = true;
-        }
-        return probing;
-    }
-
-    private _releaseSourceProbe(device: TunerDevice, channel: ChannelItem): void {
-        for (const key of this._getSourceKeys(device, channel)) {
-            const state = this._sourceFailureState.get(key);
-            if (!state?.probing || state.probeDeviceIndex !== device.index ||
-                state.probeChannelKey !== this._getProbeChannelKey(channel)) { continue; }
-            clearTimeout(state.timer);
-            state.cleanup?.();
-            state.probing = false;
-            state.retryAt = Date.now();
-            state.generation++;
-            delete state.probeDeviceIndex;
-            delete state.probeChannelKey;
-            delete state.timer;
-            delete state.cleanup;
-        }
-    }
-
-    private _validateSourceRecovery(device: TunerDevice, channel: ChannelItem): void {
-        for (const key of this._getSourceKeys(device, channel)) {
-            const state = this._sourceFailureState.get(key);
-            if (!state?.probing || state.probeDeviceIndex !== device.index ||
-                state.probeChannelKey !== this._getProbeChannelKey(channel)) { continue; }
-            const generation = state.generation;
-            const onRelease = () => this._releaseSourceProbe(device, channel);
-            device.once("release", onRelease);
-            state.cleanup = () => device.removeListener("release", onRelease);
-            state.timer = setTimeout(
-                () => this._completeSourceRecoveryProbe(device, channel, key, generation),
-                SOURCE_RECOVERY_STABLE_MS
-            );
-            state.timer.unref();
-        }
-    }
-
-    private _completeSourceRecoveryProbe(
-        device: TunerDevice,
-        channel: ChannelItem,
-        key: string,
-        generation: number
-    ): void {
-        const current = this._sourceFailureState.get(key);
-        if (!current || current.generation !== generation || current.probing === false) {
-            return;
-        }
-
-        const isStable = device.isUsing === true &&
-            device.channel === channel &&
-            Date.now() - device.lastDataAt <= SOURCE_RECOVERY_MAX_DATA_GAP_MS;
-        if (isStable === true) {
-            current.cleanup?.();
-            this._sourceFailureState.delete(key);
-            log.info(
-                "Tuner source %s recovered after %d seconds of stable streaming",
-                key,
-                SOURCE_RECOVERY_STABLE_MS / 1000
-            );
-            return;
-        }
-
-        if (device.isUsing === true && device.channel === channel) {
-            log.warn("Tuner source %s recovery probe stopped producing data", key);
-            this._markSourceFailure(device, key);
-            device.kill().catch(log.error);
-        } else {
-            log.warn("Tuner source %s recovery probe ended before validation completed", key);
-            this._releaseSourceProbe(device, channel);
-        }
-    }
-
-    private _isActiveSourceProbe(device: TunerDevice, channel: ChannelItem): boolean {
-        return this._getSourceKeys(device, channel).some(key => {
-            const state = this._sourceFailureState.get(key);
-            return state?.probing === true && state.probeDeviceIndex === device.index &&
-                state.probeChannelKey === this._getProbeChannelKey(channel);
-        });
-    }
-
-    private _markSourceFailure(device: TunerDevice, key?: string): void {
-        if (device.isRemote === false && !key) {
-            return;
-        }
-
-        key = key || this._getSourceKey(device);
-        const previous = this._sourceFailureState.get(key);
-        if (previous?.timer) {
-            clearTimeout(previous.timer);
-        }
-        previous?.cleanup?.();
-        this._sourceFailureState.set(key, {
-            retryAt: Date.now() + SOURCE_FAILURE_COOLDOWN_MS,
-            probing: false,
-            generation: (previous?.generation || 0) + 1
-        });
-        log.warn(
-            "Tuner source %s will be avoided for %d seconds after acquisition or source failure",
-            key,
-            SOURCE_FAILURE_COOLDOWN_MS / 1000
-        );
-    }
-
-    private _handleStreamFailure(device: TunerDevice, channel: ChannelItem, error?: TunerStartupError): void {
-        if (error?.failureScope === "source" || this._isActiveSourceProbe(device, channel) === true) {
-            this._markSourceFailure(device);
-        } else {
-            this._markChannelFailure(device, channel);
-        }
-        if (channel) { this._markSourceFailure(device, this._getGroupKey(device, channel)); }
-    }
-
-    private _isChannelFailureCoolingDown(device: TunerDevice, channel: ChannelItem): boolean {
-        const key = this._getChannelFailureKey(device, channel);
-        const failureUntil = this._channelFailureUntil.get(key) || 0;
-        if (failureUntil <= Date.now()) {
-            this._channelFailureUntil.delete(key);
-            return false;
-        }
-
-        return true;
-    }
-
-    private _markChannelFailure(device: TunerDevice, channel: ChannelItem): void {
-        if (!channel) {
-            return;
-        }
-
-        const key = this._getChannelFailureKey(device, channel);
-        this._channelFailureUntil.set(key, Date.now() + CHANNEL_FAILURE_COOLDOWN_MS);
-        log.warn(
-            "TunerDevice#%d will avoid channel `%s` for %d seconds after stream failure",
-            device.index,
-            channel.name,
-            CHANNEL_FAILURE_COOLDOWN_MS / 1000
-        );
-    }
-
-    private _clearChannelFailure(device: TunerDevice, channel: ChannelItem): void {
-        this._channelFailureUntil.delete(this._getChannelFailureKey(device, channel));
     }
 
     private _getDevicesByChannel(channel: ChannelItem): TunerDevice[] {

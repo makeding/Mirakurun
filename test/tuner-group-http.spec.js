@@ -27,16 +27,17 @@ const Service = require("../lib/Mirakurun/Service").default;
 const Tuner = require("../lib/Mirakurun/Tuner").default;
 const { Server } = require("../lib/Mirakurun/Server");
 
-test("channel HTTP retries another group after local no-data and shares the failure across satellite bands", { timeout: 20000 }, async t => {
+test("channel HTTP tries every source and isolates failures between acquisition sessions", { timeout: 20000 }, async t => {
     const source = `${process.execPath} -e "const b=Buffer.alloc(188*128,255);for(let i=0;i<b.length;i+=188){b[i]=71;b[i+1]=0;b[i+2]=20;b[i+3]=16}setInterval(()=>process.stdout.write(b),20)"`;
+    const failOnBS = `${process.execPath} -e "if(process.argv[1]==='BS15_0'){process.exit(1)};${source.split(' -e "')[1]} <channel>`;
     _.config = {
         server: { port: 0, hostname: "localhost", disableIPv6: true, disableWebUI: true,
             disableEITParsing: true, allowIPv4CidrRanges: ["127.0.0.0/8"], allowIPv6CidrRanges: [], allowOrigins: [] },
         channels: [{ name: "BS", type: "BS", channel: "BS15_0" }, { name: "CS", type: "CS", channel: "CS2" }],
         tuners: [
-            { name: "roof-1", types: ["BS", "CS"], command: `${process.execPath} -e "setInterval(()=>{},1000)"` },
+            { name: "roof-1", types: ["BS", "CS"], cooldownSeconds: 60, command: failOnBS },
             { name: "roof-2", types: ["BS", "CS"], command: source },
-            { name: "other-site", group: "other-site", types: ["BS", "CS"], command: source }
+            { name: "other-site", group: "other-site", types: ["BS", "CS"], command: failOnBS }
         ]
     };
     _.event = new Event();
@@ -61,9 +62,10 @@ test("channel HTTP retries another group after local no-data and shares the fail
     });
     await server.init();
     const base = `http://127.0.0.1:${[...server.servers][0].address().port}/api`;
-    for (const path of ["/channels/BS/BS15_0/stream?decode=0&format=ts", "/channels/CS/CS2/stream?decode=0&format=ts"]) {
+    for (const [type, channel, selected] of [["BS", "BS15_0", 1], ["CS", "CS2", 0], ["BS", "BS15_0", 1]]) {
         const controller = new AbortController(); controllers.push(controller);
-        const response = await fetch(base + path, { signal: controller.signal });
+        const response = await fetch(base + `/channels/${type}/${channel}/stream?decode=0&format=ts`,
+            { signal: controller.signal });
         assert.equal(response.status, 200);
         assert.equal(response.headers.get("content-type"), "video/MP2T");
         const reader = response.body.getReader();
@@ -74,28 +76,12 @@ test("channel HTTP retries another group after local no-data and shares the fail
         const status = await fetch(base + "/tuners");
         assert.equal(status.status, 200);
         const tuners = await status.json();
-        assert.equal(tuners[1].pid, null, "the second roof slot must never start");
-        assert.equal(tuners[2].isUsing, true);
+        assert.equal(tuners[selected].isUsing, true);
         controller.abort();
         await reader.cancel().catch(() => {});
-        await _.tuner.get(2).kill();
+        await _.tuner.get(selected).kill();
     }
-    assert.deepEqual(started, ["roof-1", "other-site", "other-site"]);
-    // With no alternate group left, foreground viewing must still be able
-    // to use the second physical receiver instead of returning HTTP 503.
-    _.tuner._devices = _.tuner._devices.slice(0, 2);
-    _.tuner._sourceFailureState.clear();
-    const scarceController = new AbortController(); controllers.push(scarceController);
-    const scarce = await fetch(base + "/channels/BS/BS15_0/stream?decode=0&format=ts",
-        { signal: scarceController.signal });
-    assert.equal(scarce.status, 200);
-    const scarceReader = scarce.body.getReader();
-    const scarceBytes = await scarceReader.read();
-    assert.equal(scarceBytes.done, false);
-    assert.equal(scarceBytes.value[0], 0x47);
-    assert.equal(_.tuner.get(1).isUsing, true);
-    assert.deepEqual(started.slice(3), ["roof-2"], "the healthy sibling should be used immediately");
-    scarceController.abort();await scarceReader.cancel().catch(() => {});
-    await _.tuner.get(1).kill();
-    console.log("Group HTTP acceptance: one 5-second local no-data attempt, sibling skipped, BS and CS served by alternate source (simulated receivers)");
+    assert.deepEqual(started, ["roof-1", "other-site", "roof-2", "roof-1", "roof-1", "other-site", "roof-2"]);
+    console.log("Session HTTP acceptance: failed groups fall back to a healthy sibling; CS and later BS requests start fresh despite a 60-second tuner cooldown");
+
 });
