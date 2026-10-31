@@ -39,6 +39,11 @@ Validation covers startup migration, immediate mutations, ordering, filtering,
 Unicode response lengths, concurrent HTTP requests, and unavailable storage.
 Local fixtures do not establish production-data or physical-tuner acceptance.
 
+Upstream 4.2.0 array-response chunking applies to ordinary JSON API arrays.
+Current programs and history keep their worker-serialized SQLite responses,
+including byte-accurate Content-Length and storage-failure status. JSON file
+saving remains limited to services and channel maps; programs stay in SQLite.
+
 EPG jobs pass their target network identity through to acquisition. A channel
 number or the first service on a shared route cannot substitute for that identity:
 different reception sites can use the same terrestrial frequency for different
