@@ -169,7 +169,205 @@ describe("[tsfilter.spec] TSFilter.ts: write()", () => {
       writeInChunks(filter, ts, sizes);
 
       assert.ok(Buffer.concat(filter._buffer).equals(Buffer.concat(provided.slice(-5))), `chunk sizes: ${sizes}`);
+      // 保持しているパケットは入力のチャンクを参照しない (出力しないパケットの分までメモリを抱え込まない)
+      const overlaps = b => b.buffer === ts.buffer && b.byteOffset < ts.byteOffset + ts.length && ts.byteOffset < b.byteOffset + b.length;
+      assert.ok(!filter._buffer.some(overlaps), `chunk sizes: ${sizes}`);
       filter.close();
     }
+  });
+
+  it("keeps each service stream independent when the same chunks are shared and flushed together", async () => {
+    const packets = [];
+    for (let i = 0; i < 400; i++) {
+      const pid = [0, 0x1F0, 0x1F1, 0x100, 0x110, 0x200, 0x1FFF, 0x100, 0x200, 0x300][i % 10];
+      packets.push(pid === 0 ? patPacket(i) : pid === 0x1F0 ? pmt1024Packet(i) : pid === 0x1F1 ? pmt1025Packet(i) : packet(pid, i));
+    }
+    const ts = Buffer.concat(packets);
+    const original = Buffer.from(ts);
+
+    for (const sizes of [[ts.length], [188 * 7], [1, 187, 189, 5000], [100, 88, 7, 3000]]) {
+      const services = [1024, 1025].map(serviceId => {
+        const output = collector(1024 * 1024);
+        const filter = new TSFilter({ output, serviceId });
+        return { serviceId, output, filter };
+      });
+      for (const { filter } of services) {
+        filter.write(Buffer.concat([patPacket(0), pmt1024Packet(0), pmt1025Packet(0)]));
+      }
+      await tick();
+      for (const { filter } of services) {
+        filter.write(Buffer.concat([pmt1024Packet(1), pmt1025Packet(1)]));
+      }
+      await tick();
+
+      // TunerDevice と同じく、同じチャンクを全ストリームに渡してからまとめて書き出す
+      let pos = 0;
+      for (let i = 0; pos < ts.length; i++) {
+        const chunk = ts.subarray(pos, pos + sizes[i % sizes.length]);
+        for (const { filter } of services) {
+          filter.write(chunk, true);
+        }
+        if (i % 3 === 2) {
+          for (const { filter } of services) {
+            filter.flush();
+          }
+        }
+        pos += chunk.length;
+      }
+      for (const { filter } of services) {
+        filter.flush();
+      }
+
+      // 共有している入力のチャンクは書き換えない
+      assert.ok(ts.equals(original), `chunk sizes: ${sizes}`);
+
+      for (const { serviceId, output, filter } of services) {
+        const pids = serviceId === 1024 ? [0x1F0, 0x100, 0x110] : [0x1F1, 0x200];
+        const expected = [];
+        for (const p of packets) {
+          const pid = p.readUInt16BE(1) & 0x1FFF;
+          if (pid === 0) {
+            expected.push(Buffer.concat([p.subarray(0, 5), filter._patsec]));
+          } else if (pids.includes(pid)) {
+            expected.push(p);
+          }
+        }
+        assert.ok(output.result().equals(Buffer.concat(expected)), `serviceId: ${serviceId}, chunk sizes: ${sizes}`);
+        filter.close();
+      }
+    }
+  });
+
+  it("writes the deferred packets when closed", () => {
+    const packets = [];
+    for (let i = 0; i < 20; i++) {
+      packets.push(packet(0x100, i));
+    }
+    const output = collector(1024 * 1024);
+    const filter = new TSFilter({ output });
+    filter.write(patPacket(0));
+
+    filter.write(Buffer.concat(packets), true);
+    assert.ok(output.result().equals(patPacket(0)));
+    filter.close();
+
+    assert.ok(output.result().equals(Buffer.concat([patPacket(0), ...packets])));
+  });
+
+  it("does not defer the output until the PAT is written", () => {
+    const output = collector(1024 * 1024);
+    const filter = new TSFilter({ output });
+
+    // PAT より前のパケットを出力しただけでは、出力を始めたとしない
+    filter.write(packet(0x100, 0), true);
+    filter.write(patPacket(1), true);
+    assert.ok(output.result().equals(Buffer.concat([packet(0x100, 0), patPacket(1)])));
+
+    filter.write(packet(0x100, 2), true);
+    assert.strictEqual(output.result().length, 188 * 2);
+    filter.close();
+  });
+
+  it("counts only the PAT queued after ready and not trimmed", async () => {
+    // 準備ができる前の PAT は、上限を超えて破棄される場合があるため数えない
+    const waiting = new TSFilter({ output: collector(1024 * 1024), serviceId: 1024 });
+    waiting.write(patPacket(0), true);
+    assert.strictEqual(waiting._patBuffered, false);
+    waiting.close();
+
+    // 出力が詰まっている間に上限を超えて破棄した場合は、PAT を書き出したとしない
+    const output = new Writable({ highWaterMark: 188, write() { /* 書き終えない */ } });
+    const filter = new TSFilter({ output });
+    filter.write(packet(0x100, 0), true);
+    filter.write(patPacket(1), true);
+    assert.strictEqual(filter._patBuffered, true);
+    for (let i = 2; i < 10; i++) {
+      filter.write(packet(0x100, i), true);
+    }
+    assert.strictEqual(filter._patBuffered, false);
+    filter.close();
+
+    // 最初の PAT を書き出した後は、詰まって破棄しても最初の PAT を書き出したままとする (入力ごとに書き出さない)
+    const stalled = new Writable({ highWaterMark: 188, write() { /* 書き終えない */ } });
+    const started = new TSFilter({ output: stalled });
+    started.write(patPacket(0), true);
+    assert.strictEqual(started._patWritten, true);
+    for (let i = 1; i < 10; i++) {
+      started.write(packet(0x100, i), true);
+    }
+    assert.strictEqual(started._bufferBytes, 188 * 9);
+    started.flush();
+    assert.ok(started._bufferBytes < 188 * 9);
+    assert.strictEqual(started._patWritten, true);
+    assert.strictEqual(started._patBuffered, true);
+    started.close();
+  });
+
+  it("defers the output while waiting for the event", () => {
+    const filter = new TSFilter({ output: collector(1024 * 1024), serviceId: 1, eventId: 1 });
+
+    // 準備ができるまでは出力できないため、入力ごとに保持するためのコピーをしない
+    filter.write(packet(0x11, 0), true);
+    filter.write(packet(0x11, 1), true);
+    assert.ok(Buffer.concat(filter._buffer).equals(Buffer.concat([packet(0x11, 0), packet(0x11, 1)])));
+    assert.strictEqual(filter._bufferRetainedCount, 0);
+    filter.close();
+  });
+
+  it("writes the deferred packets when the provided event has ended", async () => {
+    const output = collector(1024 * 1024);
+    const filter = new TSFilter({ output, serviceId: 1, eventId: 1 });
+    filter._ready = true;
+    filter._pmtPid = 0x1F0;
+    filter._providePids = null;
+    filter._eventEndTimeout = 10;
+
+    const p = packet(0x100, 0);
+    filter.write(p, true);
+    // 次の番組の EIT p/f を受け取ると、eventEndTimeout の後に閉じる
+    filter._onEIT(0x12, { table_id: 0x4E, section_number: 0, service_id: 1, events: [{ event_id: 2 }] });
+    await new Promise(resolve => setTimeout(resolve, 50));
+
+    assert.strictEqual(filter.closed, true);
+    assert.ok(output.result().equals(p));
+  });
+
+  it("parses EIT only in the filter that writes EPG for the network", async () => {
+    const status = require("../lib/Mirakurun/status").default;
+    const eit = packet(0x12, 0);
+    const parsed = filter => {
+      let count = 0;
+      const write = filter._parser.write.bind(filter._parser);
+      filter._parser.write = buffers => {
+        count += buffers.filter(b => (b.readUInt16BE(1) & 0x1FFF) === 0x12).length;
+        return write(buffers);
+      };
+      return () => count;
+    };
+
+    status.epg[1] = true;
+    const other = new TSFilter({ output: collector(1024 * 1024), networkId: 1, parseEIT: true });
+    const otherCount = parsed(other);
+    other.write(eit);
+    await tick();
+    // 他のフィルターが EPG を書き込んでいるネットワークの EIT は解析しない
+    assert.strictEqual(otherCount(), 0);
+
+    // 書き込んでいたフィルターが閉じたら引き継ぐ
+    status.epg[1] = false;
+    other.write(eit);
+    await tick();
+    assert.strictEqual(otherCount(), 1);
+    other.close();
+
+    // 番組を指定したストリームは、番組の開始と終了の検出に EIT を使うため常に解析する
+    status.epg[1] = true;
+    const program = new TSFilter({ output: collector(1024 * 1024), networkId: 1, serviceId: 1, eventId: 1, parseEIT: true });
+    const programCount = parsed(program);
+    program.write(eit);
+    await tick();
+    assert.strictEqual(programCount(), 1);
+    program.close();
+    delete status.epg[1];
   });
 });
