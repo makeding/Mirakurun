@@ -159,6 +159,10 @@ When a tuner supports `BS4K` together with `BS` / `CS`, specify `commandBS4K` to
 
 Compatible `dvbv5-zap` commands for ISDB-T and ISDB-S are tuned through the Linux DVB device directly by default. This avoids starting and stopping the command for every channel. Set `disableDvbDirect: true` to keep the command-process behavior. Unsupported options, delivery systems, or commands automatically use the configured command.
 
+#### recisdb session command
+
+When the configured command is `recisdb session ...`, Mirakurun detects the subcommand and uses its persistent control protocol. It keeps that child process, writes line commands to stdin, receives line responses from fd 3, and receives binary TS from stdout. It sends `TUNE`, waits for `READY`, drains buffered packets from the previous tune, and then sends `START`. The existing five-second first-TS wait after `START` determines startup success. `commandBS4K` remains on its configured command path.
+
 #### Optional DVB frontend selection
 
 Set `dvbAutoDiscovery: true` to let Mirakurun select a Linux DVB frontend for this tuner entry. Leave `dvbFrontendPath` empty for automatic selection, or set it to `/dev/dvb/adapterN/frontendM` to pin the entry to that frontend. Existing command, remote, and `dvbDevicePath` configurations keep their behavior when this mode is off.

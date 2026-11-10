@@ -15,6 +15,7 @@
 */
 import * as child_process from "child_process";
 import { existsSync } from "fs";
+import * as path from "path";
 import * as stream from "stream";
 import * as util from "util";
 import EventEmitter = require("eventemitter3");
@@ -37,6 +38,7 @@ import { parseDvbv5ZapCommand } from "./dvb/dvbv5-zap";
 import { DvbChannels, findChannelParams, loadChannelsConf, readChannelsConf } from "./dvb/DvbChannelConf";
 
 const STREAM_START_TIMEOUT_MS = 5000;
+const RECISDB_CONTROL_TIMEOUT_MS = 5000;
 const DVB_CLOSE_DELAY = 1000;
 const DVB_RESPAWN_DELAY = 1000;
 const DVB_MISSING_DEVICE_ERRORS = ["ENOENT", "ENODEV", "ENXIO"];
@@ -79,6 +81,13 @@ interface User extends common.User {
 
 interface StartStreamOptions {
     suppressGroupCombine?: boolean;
+}
+
+interface RecisdbResponseWaiter {
+    readonly expected: "READY";
+    readonly resolve: () => void;
+    readonly reject: (err: Error) => void;
+    readonly timer: NodeJS.Timeout;
 }
 
 export interface TunerDeviceStatus {
@@ -129,6 +138,15 @@ export default class TunerDevice extends EventEmitter {
     private _dvbFrontendPath: string = null;
     private _dvbPromise: Promise<void> = null;
     private _forceCommand = false;
+    // recisdb session control uses stdin for requests and fd 3 for replies;
+    // stdout remains the tuner TS stream.
+    private _recisdbControl: stream.Writable = null;
+    private _recisdbResponses: stream.Readable = null;
+    private _recisdbResponseBuffer = "";
+    private _recisdbResponseWaiters = new Map<number, RecisdbResponseWaiter>();
+    private _recisdbRequestId = 0;
+    private _recisdbPromise: Promise<void> = null;
+    private _discardRecisdbOutput = false;
 
     constructor(private _index: number, private _config: apid.ConfigTunersItem, private _dvbPool?: DvbFrontendPool) {
         super();
@@ -329,9 +347,16 @@ export default class TunerDevice extends EventEmitter {
                         throw new Error(util.format("TunerDevice#%d has higher priority user", this._index));
                     }
 
-                    await this._kill(true);
-                    this._spawn(channel, user.disableMMTSDecoder === true, options, user.outputFormat, user.disableDecoder === true);
-                    spawning = this._dvbPromise;
+                    if (this._canUseRecisdbSession(channel)) {
+                        this._endUsersForRecisdbRetune();
+                        this._recisdbPromise = this._retuneRecisdbSession(channel);
+                        this._recisdbPromise.catch(() => undefined);
+                        spawning = this._recisdbPromise;
+                    } else {
+                        await this._kill(true);
+                        this._spawn(channel, user.disableMMTSDecoder === true, options, user.outputFormat, user.disableDecoder === true);
+                        spawning = this._dvbPromise || this._recisdbPromise;
+                    }
                     waitForStream = true;
                 } else if (
                     (this._canFanoutMMTSDecoder(channel) === false &&
@@ -345,7 +370,7 @@ export default class TunerDevice extends EventEmitter {
                     }
                     await this._kill(true);
                     this._spawn(channel, user.disableMMTSDecoder === true, options, user.outputFormat, user.disableDecoder === true);
-                    spawning = this._dvbPromise;
+                    spawning = this._dvbPromise || this._recisdbPromise;
                     waitForStream = true;
                 }
             } else {
@@ -353,7 +378,7 @@ export default class TunerDevice extends EventEmitter {
                     throw new Error(util.format("TunerDevice#%d device path is not available", this._index));
                 }
                 this._spawn(channel, user.disableMMTSDecoder === true, options, user.outputFormat, user.disableDecoder === true);
-                spawning = this._dvbPromise;
+                spawning = this._dvbPromise || this._recisdbPromise;
                 waitForStream = true;
             }
         }
@@ -659,8 +684,11 @@ export default class TunerDevice extends EventEmitter {
             }
 
             const parsed = common.parseCommandForSpawn(cmd);
+            const recisdbSession = this._usesRecisdbSession(ch, cmd);
 
-            this._process = child_process.spawn(parsed.command, parsed.args);
+            this._process = recisdbSession
+                ? child_process.spawn(parsed.command, parsed.args, { stdio: ["pipe", "pipe", "pipe", "pipe"] })
+                : child_process.spawn(parsed.command, parsed.args);
         } catch (err) {
             if (frontend) { this._dvbPool.release(this._index); }
             throw err;
@@ -674,7 +702,17 @@ export default class TunerDevice extends EventEmitter {
         this._spawnedAt = Date.now();
         this._commandFailed = false;
 
-        if (this._config.dvbDevicePath) {
+        if (this._usesRecisdbSession(ch)) {
+            this._stream = this._process.stdout;
+            this._recisdbControl = this._process.stdin;
+            this._recisdbResponses = this._process.stdio[3] as stream.Readable;
+            this._recisdbControl.once("error", this._recisdbResponseOnError.bind(this));
+            this._recisdbResponses.on("data", this._recisdbResponseOnData.bind(this));
+            this._recisdbResponses.once("error", this._recisdbResponseOnError.bind(this));
+            this._recisdbResponses.once("close", this._recisdbResponseOnClose.bind(this));
+            this._recisdbPromise = this._retuneRecisdbSession(ch);
+            this._recisdbPromise.catch(() => undefined);
+        } else if (this._config.dvbDevicePath) {
             const cat = child_process.spawn("cat", [this._config.dvbDevicePath]);
 
             cat.once("error", (err) => {
@@ -732,6 +770,10 @@ export default class TunerDevice extends EventEmitter {
             );
 
             this._commandFailed = this._commandFailed || code !== 0 || signal !== null;
+            this._rejectRecisdbWaiters(new Error(util.format(
+                "TunerDevice#%d recisdb session closed (code=%s, signal=%s)",
+                this._index, code, signal
+            )));
             this._end();
             setTimeout(this._release.bind(this), this._config.dvbDevicePath ? 1000 : 100);
         });
@@ -745,6 +787,163 @@ export default class TunerDevice extends EventEmitter {
 
         this._updated();
         log.info("TunerDevice#%d process has spawned by command `%s` (pid=%d)", this._index, cmd, this._process.pid);
+    }
+
+    private _usesRecisdbSession(ch: ChannelItem, command?: string): boolean {
+        if (this._isRemote || (ch.type === "BS4K" && this._config.commandBS4K)) { return false; }
+        try {
+            const parsed = common.parseCommandForSpawn(command || this._config.command);
+            return path.basename(parsed.command) === "recisdb" && parsed.args[0] === "session";
+        } catch (_) {
+            return false;
+        }
+    }
+
+    private _canUseRecisdbSession(ch: ChannelItem): boolean {
+        return this._usesRecisdbSession(ch) && this._process !== null &&
+            this._recisdbControl !== null && this._recisdbResponses !== null;
+    }
+
+    private _endUsersForRecisdbRetune(): void {
+        clearInterval(this._sourceWatchdog);
+        this._sourceWatchdog = undefined;
+        _.gguide?.endObservation(this._index);
+        for (const existingUser of this._users) {
+            existingUser._stream?.releaseTsmfCarriers?.();
+            existingUser._stream?.end();
+        }
+        this._users.clear();
+        this._syncStreamFilterPriorities();
+    }
+
+    private async _retuneRecisdbSession(ch: ChannelItem): Promise<void> {
+        if (!this._canUseRecisdbSession(ch)) {
+            throw new Error(util.format("TunerDevice#%d has no recisdb session", this._index));
+        }
+
+        this._channel = ch;
+        this._lastDataAt = 0;
+        this._spawnedAt = Date.now();
+        this._commandFailed = false;
+        this._updated();
+
+        const id = ++this._recisdbRequestId;
+        this._discardRecisdbOutput = true;
+        try {
+            await this._sendRecisdbCommand(`TUNE\t${id}\t${ch.channel}\n`, id, "READY");
+            // READY guarantees the old DVB reader has stopped. Pause only now,
+            // so a full stdout pipe cannot block recisdb from handling TUNE.
+            this._stream.pause();
+            this._drainRecisdbStdout();
+            this._discardRecisdbOutput = false;
+            await this._sendRecisdbStart(`START\t${id}\n`);
+        } catch (err) {
+            throw new TunerStartupError(util.format(
+                "TunerDevice#%d recisdb session could not start channel `%s` (%s)",
+                this._index, ch.name, err.message
+            ), "channel");
+        } finally {
+            this._stream.resume();
+        }
+        log.info("TunerDevice#%d recisdb session tuned to channel %s in %dms",
+            this._index, ch.channel, Date.now() - this._spawnedAt);
+    }
+
+    private _sendRecisdbCommand(command: string, id: number, expected: "READY"): Promise<void> {
+        const control = this._recisdbControl;
+        if (!control || control.writable === false) {
+            return Promise.reject(new Error(util.format("TunerDevice#%d recisdb control stream is closed", this._index)));
+        }
+        return new Promise<void>((resolve, reject) => {
+            const timer = setTimeout(() => {
+                this._recisdbResponseWaiters.delete(id);
+                reject(new Error(util.format(
+                    "TunerDevice#%d recisdb session did not reply %s for request %d within %dms",
+                    this._index, expected, id, RECISDB_CONTROL_TIMEOUT_MS
+                )));
+            }, RECISDB_CONTROL_TIMEOUT_MS);
+            this._recisdbResponseWaiters.set(id, { expected, resolve, reject, timer });
+            control.write(command, err => {
+                if (!err) { return; }
+                const waiter = this._recisdbResponseWaiters.get(id);
+                if (!waiter) { return; }
+                clearTimeout(waiter.timer);
+                this._recisdbResponseWaiters.delete(id);
+                waiter.reject(err);
+            });
+        });
+    }
+
+    private _sendRecisdbStart(command: string): Promise<void> {
+        const control = this._recisdbControl;
+        if (!control || control.writable === false) {
+            return Promise.reject(new Error(util.format("TunerDevice#%d recisdb control stream is closed", this._index)));
+        }
+        return new Promise<void>((resolve, reject) => control.write(command, err => err ? reject(err) : resolve()));
+    }
+
+    private _recisdbResponseOnData(chunk: Buffer): void {
+        this._recisdbResponseBuffer += chunk.toString("utf8");
+        for (;;) {
+            const newline = this._recisdbResponseBuffer.indexOf("\n");
+            if (newline === -1) { return; }
+            const line = this._recisdbResponseBuffer.slice(0, newline).replace(/\r$/, "");
+            this._recisdbResponseBuffer = this._recisdbResponseBuffer.slice(newline + 1);
+            const [kind, idText, message] = line.split("\t", 3);
+            const id = Number(idText);
+            const waiter = this._recisdbResponseWaiters.get(id);
+            if (kind === "ERROR" && !waiter) {
+                this._recisdbControlFailure(new Error(util.format(
+                    "TunerDevice#%d recisdb tune failed: %s", this._index, message || "unknown error"
+                )));
+                continue;
+            }
+            if (!waiter) {
+                log.warn("TunerDevice#%d ignored recisdb session response `%s`", this._index, line);
+                continue;
+            }
+            clearTimeout(waiter.timer);
+            this._recisdbResponseWaiters.delete(id);
+            if (kind === "ERROR") {
+                waiter.reject(new Error(util.format("TunerDevice#%d recisdb tune failed: %s", this._index, message || "unknown error")));
+            } else if (kind === waiter.expected) {
+                waiter.resolve();
+            } else {
+                waiter.reject(new Error(util.format(
+                    "TunerDevice#%d recisdb session replied %s while waiting for %s", this._index, kind, waiter.expected
+                )));
+            }
+        }
+    }
+
+    private _recisdbResponseOnError(err: Error): void {
+        this._recisdbControlFailure(err);
+    }
+
+    private _recisdbResponseOnClose(): void {
+        this._recisdbControlFailure(new Error(util.format("TunerDevice#%d recisdb control response stream closed", this._index)));
+    }
+
+    private _recisdbControlFailure(err: Error): void {
+        this._rejectRecisdbWaiters(err);
+        if (!this._process || this._closing || this._exited) { return; }
+        log.error("TunerDevice#%d recisdb session control failed (%s)", this._index, err.message);
+        this._commandFailed = true;
+        this._kill(false).catch(log.error);
+    }
+
+    private _rejectRecisdbWaiters(err: Error): void {
+        for (const waiter of this._recisdbResponseWaiters.values()) {
+            clearTimeout(waiter.timer);
+            waiter.reject(err);
+        }
+        this._recisdbResponseWaiters.clear();
+    }
+
+    private _drainRecisdbStdout(): void {
+        while (this._stream?.read() !== null) {
+            // Drop packets produced by the previous tune before START.
+        }
     }
 
     private async _spawnDvb(
@@ -826,6 +1025,7 @@ export default class TunerDevice extends EventEmitter {
     }
 
     private _streamOnData(chunk: Buffer): void {
+        if (this._discardRecisdbOutput) { return; }
         this._lastDataAt = Date.now();
         if (this._canFanoutMMTSDecoder(this._channel) === true) {
             for (const user of this._users) {
@@ -1147,6 +1347,14 @@ export default class TunerDevice extends EventEmitter {
     private _release(): void {
         clearInterval(this._sourceWatchdog);
         this._sourceWatchdog = undefined;
+        this._rejectRecisdbWaiters(new Error(util.format("TunerDevice#%d recisdb session released", this._index)));
+        this._recisdbControl?.removeAllListeners();
+        this._recisdbResponses?.removeAllListeners();
+        this._recisdbControl = null;
+        this._recisdbResponses = null;
+        this._recisdbResponseBuffer = "";
+        this._discardRecisdbOutput = false;
+        this._recisdbPromise = null;
         if (this._process) {
             this._process.stderr.removeAllListeners();
             this._process.removeAllListeners();
