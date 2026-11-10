@@ -96,6 +96,8 @@
   command: cmd <channel> --arg1 --arg2 <exampleArg1> <exampleArg2>... # String
   # BS4K用の任意のコマンド。省略時は`command`が使われます。
   commandBS4K: cmd-bs4k <channel> --arg1 --arg2 <exampleArg1> <exampleArg2>... # String
+  # 従来どおり dvbv5-zap をプロセス実行する場合に true
+  disableDvbDirect: true # Boolean (optional)
   # dvb用
   dvbDevicePath: /dev/dvb/adapter/dvr/path # String
   # 任意の事前確認パス。未指定時は dvbDevicePath が設定されていればそれを確認します。
@@ -121,6 +123,10 @@
 #### commandBS4K / mmtsDecoder
 
 `BS` / `CS` と `BS4K` を同じチューナーで扱う場合、`commandBS4K` を指定すると `BS4K` チャンネルだけ別コマンドで起動できます。省略時は `command` が使われます。`BS4K` コマンドの出力に MMTS 変換が必要な場合は `mmtsDecoder` を指定します。
+
+#### DVB Direct
+
+ISDB-T / ISDB-S 用の対応する `dvbv5-zap` コマンドは、既定でコマンドプロセスを起動せずに Linux DVB デバイスを直接操作します。従来どおりコマンドを実行する場合は `disableDvbDirect: true` を指定します。未対応の方式、オプション、その他のコマンドは、設定されたコマンドを実行します。
 
 #### checkDevicePath
 

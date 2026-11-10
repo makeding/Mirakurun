@@ -96,6 +96,8 @@
   command: cmd <channel> --arg1 --arg2 <exampleArg1> <exampleArg2>... # String
   # Optional command used only for BS4K. Falls back to `command` when omitted.
   commandBS4K: cmd-bs4k <channel> --arg1 --arg2 <exampleArg1> <exampleArg2>... # String
+  # Optional: keep running dvbv5-zap as a child process instead of tuning directly.
+  disableDvbDirect: true # Boolean
   # For dvb
   dvbDevicePath: /dev/dvb/adapter/dvr/path # String
   # Optional preflight path. If omitted, dvbDevicePath is checked when set.
@@ -153,13 +155,17 @@ Specify the CAS processing command as needed.
 
 When a tuner supports `BS4K` together with `BS` / `CS`, specify `commandBS4K` to use a dedicated command for `BS4K` channels. If `commandBS4K` is omitted, `command` is used. Specify `mmtsDecoder` when the `BS4K` command output needs MMTS conversion.
 
+#### disableDvbDirect
+
+Compatible `dvbv5-zap` commands for ISDB-T and ISDB-S are tuned through the Linux DVB device directly by default. This avoids starting and stopping the command for every channel. Set `disableDvbDirect: true` to keep the command-process behavior. Unsupported options, delivery systems, or commands automatically use the configured command.
+
 #### Optional DVB frontend selection
 
 Set `dvbAutoDiscovery: true` to let Mirakurun select a Linux DVB frontend for this tuner entry. Leave `dvbFrontendPath` empty for automatic selection, or set it to `/dev/dvb/adapterN/frontendM` to pin the entry to that frontend. Existing command, remote, and `dvbDevicePath` configurations keep their behavior when this mode is off.
 
 At startup Mirakurun enumerates `/dev/dvb/adapter*/frontend*` and runs `dvb-fe-tool -a N -f M` from v4l-utils with the C locale. This read-only query obtains the driver's supported delivery systems (`DTV_ENUM_DELSYS` on DVBv5). Install `dvb-fe-tool` in the server/container PATH and expose the DVB device nodes. Missing tools, permission errors, unsupported systems, or missing devices leave affected entries unselectable and produce a server log; other tuners remain usable. Restart after adding devices or changing drivers. Initial configuration generation creates one slot per adapter and, as before, prefers the terrestrial channel file when an adapter supports both terrestrial and satellite reception; configure the other reception family explicitly when needed.
 
-Each configured entry provides one simultaneous tuning slot. On each tune, Mirakurun leases a compatible free frontend, injects `<dvbFrontendPath>`, `<dvbAdapter>` and `<dvbFrontend>` into the command, and holds the lease until the command has stopped and the stream is released. The command must contain either `<dvbFrontendPath>` or both `<dvbAdapter>` and `<dvbFrontend>`, including `commandBS4K` when set. Channel variables cannot override these device selections. Normal channel restrictions, priorities, stream sharing, cooldown and failover still apply.
+Each configured entry provides one simultaneous tuning slot. On each tune, Mirakurun leases a compatible free frontend, injects `<dvbFrontendPath>`, `<dvbAdapter>` and `<dvbFrontend>` into the command, and holds the lease until the tuner is released. A compatible `dvbv5-zap` command is used to tune the DVB device directly by default; set `disableDvbDirect: true` to keep running it as a child process. Unsupported `dvbv5-zap` options and other commands continue to use the command. Channel variables cannot override these device selections. Normal channel restrictions, priorities, stream sharing, cooldown and failover still apply.
 
 Driver capabilities select ISDB-T for GR/GR-ALT, ISDB-S for satellite BS/CS, DVB-S/S2 for SKY, and ISDB-S3 for satellite BS4K. CATV/HIKARI BS/CS/BS4K require ISDB-C. ISDB-S or DVB-S2 alone never implies BS4K support. The command and its channel configuration remain responsible for tuning parameters and output format.
 

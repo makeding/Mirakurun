@@ -237,7 +237,7 @@ export interface TunerDevice {
     types: ChannelType[];
     routes?: ChannelRoute[];
     command: string;
-    pid: number;
+    pid: number | null;
     users: TunerUser[];
     isAvailable: boolean;
     isRemote: boolean;
@@ -292,7 +292,7 @@ export interface StreamMeasurement {
 }
 
 export interface TunerProcess {
-    pid: number;
+    pid: number | null;
 }
 
 export interface JobScheduleItem {
@@ -434,6 +434,8 @@ export interface ConfigTunersItem {
     dvbAutoDiscovery?: boolean;
     /** Optional /dev/dvb/adapterN/frontendM pin; empty selects a compatible free frontend. */
     dvbFrontendPath?: string;
+    /** Run dvbv5-zap as a process instead of tuning the DVB device directly. */
+    disableDvbDirect?: boolean;
     /** [dvb] dvr adapter device path */
     dvbDevicePath?: string;
     /** Optional device path checked before starting this tuner. Falls back to dvbDevicePath when omitted. */

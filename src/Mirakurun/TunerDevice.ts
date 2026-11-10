@@ -32,8 +32,27 @@ import StreamFilter from "./StreamFilter";
 import Client, { ProgramsQuery } from "../client";
 import { REMOTE_EXIT_CHANNEL_UNAVAILABLE } from "../remoteExitCodes";
 import { TSHandoffBuffer, TSHandoffOptions, TSHandoffProbe } from "./TSHandoff";
+import type DvbDevice from "./dvb/DvbDevice";
+import { parseDvbv5ZapCommand } from "./dvb/dvbv5-zap";
+import { DvbChannels, findChannelParams, loadChannelsConf, readChannelsConf } from "./dvb/DvbChannelConf";
 
 const STREAM_START_TIMEOUT_MS = 5000;
+const DVB_CLOSE_DELAY = 1000;
+const DVB_RESPAWN_DELAY = 1000;
+const DVB_MISSING_DEVICE_ERRORS = ["ENOENT", "ENODEV", "ENXIO"];
+
+let dvbDeviceClass: typeof DvbDevice | null;
+function loadDvbDevice(): typeof DvbDevice | null {
+    if (dvbDeviceClass === undefined) {
+        try {
+            dvbDeviceClass = (require("./dvb/DvbDevice") as typeof import("./dvb/DvbDevice")).default;
+        } catch (err) {
+            log.warn("TunerDevice: DVB device direct access is unavailable (%s)", err.message);
+            dvbDeviceClass = null;
+        }
+    }
+    return dvbDeviceClass;
+}
 
 export type TunerStartupFailureScope = "channel" | "source";
 
@@ -101,6 +120,15 @@ export default class TunerDevice extends EventEmitter {
     private _spawnedAt = 0;
     private _sourceWatchdog?: NodeJS.Timeout;
     private _commandFailed = false;
+    private _dvb: DvbDevice = null;
+    private _dvbChannelsConfPath: string = null;
+    private _dvbChannelByFrequency = false;
+    private _dvbActive = false;
+    private _dvbGeneration = 0;
+    private _dvbCloseTimer: NodeJS.Timeout = null;
+    private _dvbFrontendPath: string = null;
+    private _dvbPromise: Promise<void> = null;
+    private _forceCommand = false;
 
     constructor(private _index: number, private _config: apid.ConfigTunersItem, private _dvbPool?: DvbFrontendPool) {
         super();
@@ -273,6 +301,7 @@ export default class TunerDevice extends EventEmitter {
     async startStream(user: User, stream: StreamSink, channel?: ChannelItem, recoverUnavailable = false, options?: StartStreamOptions): Promise<void> {
         log.debug("TunerDevice#%d start stream for user `%s` (priority=%d)...", this._index, user.id, user.priority);
         let waitForStream = false;
+        let spawning: Promise<void> = null;
 
         if (this._isAvailable === false) {
             if (recoverUnavailable === true && channel) {
@@ -302,6 +331,7 @@ export default class TunerDevice extends EventEmitter {
 
                     await this._kill(true);
                     this._spawn(channel, user.disableMMTSDecoder === true, options, user.outputFormat, user.disableDecoder === true);
+                    spawning = this._dvbPromise;
                     waitForStream = true;
                 } else if (
                     (this._canFanoutMMTSDecoder(channel) === false &&
@@ -315,6 +345,7 @@ export default class TunerDevice extends EventEmitter {
                     }
                     await this._kill(true);
                     this._spawn(channel, user.disableMMTSDecoder === true, options, user.outputFormat, user.disableDecoder === true);
+                    spawning = this._dvbPromise;
                     waitForStream = true;
                 }
             } else {
@@ -322,6 +353,7 @@ export default class TunerDevice extends EventEmitter {
                     throw new Error(util.format("TunerDevice#%d device path is not available", this._index));
                 }
                 this._spawn(channel, user.disableMMTSDecoder === true, options, user.outputFormat, user.disableDecoder === true);
+                spawning = this._dvbPromise;
                 waitForStream = true;
             }
         }
@@ -345,13 +377,18 @@ export default class TunerDevice extends EventEmitter {
         if (waitForStream || this._lastDataAt === 0) {
             const startedProcess = this._process;
             try {
+                if (spawning) {
+                    await spawning;
+                    if (this._dvbPromise === spawning) { this._dvbPromise = null; }
+                }
                 await this._waitForStream(stream);
             } catch (err) {
                 this._users.delete(user);
                 if (err instanceof TunerStartupError) {
                     this.emit("streamFailure", streamChannel, err);
                 }
-                if (this._process === startedProcess && this._process?.pid && this._exited === false && this._closing === false) {
+                if ((this._process === startedProcess && this._process?.pid || this._dvbActive) &&
+                    this._exited === false && this._closing === false) {
                     await this._kill(true).catch(log.error);
                 }
                 this._updated();
@@ -419,7 +456,7 @@ export default class TunerDevice extends EventEmitter {
         // Reserve both endpoints synchronously, before the first await.
         this._handoffInProgress = true;
         device._handoffInProgress = true;
-        const sourceProcess = this._process;
+        const sourceProcess = this._process || this._dvb;
         const sourceChannel = this._channel;
         const users = [...this._users];
         const serviceUser = users.find(user => user.streamSetting && user.streamSetting.serviceId !== undefined);
@@ -447,7 +484,7 @@ export default class TunerDevice extends EventEmitter {
 
         try {
             await device.startStream(tempUser, newBuffer as any, this._channel);
-            const targetProcess = device._process;
+            const targetProcess = device._process || device._dvb;
 
             const switchPCR = await newBuffer.waitForSwitchPCR(() => oldProbe.lastPCR);
             if (switchPCR === null) {
@@ -461,8 +498,8 @@ export default class TunerDevice extends EventEmitter {
 
             // Acquisition and PCR synchronization yield to other requests. Never
             // commit a snapshot whose source, target or users changed meanwhile.
-            if (this._process !== sourceProcess || this._exited || this._channel !== sourceChannel ||
-                device._channel !== sourceChannel || !targetProcess || device._process !== targetProcess || device._exited ||
+            if ((this._process || this._dvb) !== sourceProcess || this._exited || this._channel !== sourceChannel ||
+                device._channel !== sourceChannel || !targetProcess || (device._process || device._dvb) !== targetProcess || device._exited ||
                 !device._users.has(tempUser) || this._users.size !== users.length ||
                 users.some(user => !this._users.has(user) || user._stream.closed)) {
                 throw new Error("handoff ownership changed during synchronization");
@@ -486,7 +523,7 @@ export default class TunerDevice extends EventEmitter {
         } catch (err) {
             log.warn("TunerDevice#%d handoff to TunerDevice#%d failed: %s", this._index, device.index, err.message);
             device.endStream(tempUser);
-            if (device._users.size === 0 && device._process) {
+            if (device._users.size === 0 && (device._process || device._dvbActive)) {
                 await device._kill(true).catch(log.error);
             }
             return false;
@@ -575,6 +612,52 @@ export default class TunerDevice extends EventEmitter {
                 } : {})
             });
 
+            if (this._dvb !== null && this._forceCommand === false && this._isRemote === false && this._config.disableDvbDirect !== true &&
+                !(ch.type === "BS4K" && this._config.commandBS4K)) {
+                this._command = cmd;
+                this._dvbPromise = this._spawnDvb(ch, disableMMTSDecoder, _options, outputFormat, disableDecoder);
+                this._dvbPromise.catch(() => undefined);
+                return;
+            }
+
+            if (this._forceCommand === false && this._isRemote === false && this._config.disableDvbDirect !== true &&
+                !(ch.type === "BS4K" && this._config.commandBS4K)) {
+                try {
+                    const directOptions = parseDvbv5ZapCommand(cmd, this._config.dvbDevicePath);
+                    if (directOptions !== null) {
+                        loadChannelsConf(directOptions.channelsConfPath);
+                        const DvbDeviceClass = loadDvbDevice();
+                        if (DvbDeviceClass !== null) {
+                            const options = frontend ? {
+                                ...directOptions,
+                                adapter: frontend.adapter,
+                                frontend: frontend.frontend
+                            } : directOptions;
+                            const frontendPath = `/dev/dvb/adapter${options.adapter}/frontend${options.frontend || 0}`;
+                            if (this._dvb !== null && this._dvbFrontendPath !== frontendPath) {
+                                log.info("TunerDevice#%d DVB frontend changed; using command mode for this tune", this._index);
+                            } else {
+                                if (this._dvb === null) {
+                                    this._dvb = new DvbDeviceClass(options);
+                                    this._dvbFrontendPath = frontendPath;
+                                    this._dvb.on("data", chunk => (this._stream as stream.PassThrough | null)?.write(chunk));
+                                    this._dvb.on("overflow", () => log.warn("TunerDevice#%d DVB device buffer overflow", this._index));
+                                    this._dvb.on("error", this._dvbOnError.bind(this));
+                                }
+                                this._dvbChannelsConfPath = directOptions.channelsConfPath;
+                                this._dvbChannelByFrequency = directOptions.channelByFrequency;
+                                this._command = cmd;
+                                this._dvbPromise = this._spawnDvb(ch, disableMMTSDecoder, _options, outputFormat, disableDecoder);
+                                this._dvbPromise.catch(() => undefined);
+                                return;
+                            }
+                        }
+                    }
+                } catch (err) {
+                    log.info("TunerDevice#%d uses dvbv5-zap command mode (%s)", this._index, err.message);
+                }
+            }
+
             const parsed = common.parseCommandForSpawn(cmd);
 
             this._process = child_process.spawn(parsed.command, parsed.args);
@@ -662,6 +745,84 @@ export default class TunerDevice extends EventEmitter {
 
         this._updated();
         log.info("TunerDevice#%d process has spawned by command `%s` (pid=%d)", this._index, cmd, this._process.pid);
+    }
+
+    private async _spawnDvb(
+        ch: ChannelItem,
+        disableMMTSDecoder = false,
+        options?: StartStreamOptions,
+        outputFormat?: apid.StreamFormat,
+        disableDecoder = false
+    ): Promise<void> {
+        if (this._dvbActive) {
+            throw new Error(util.format("TunerDevice#%d has DVB stream", this._index));
+        }
+        clearTimeout(this._dvbCloseTimer);
+        this._dvbCloseTimer = null;
+        this._dvbActive = true;
+        this._command = `${this._dvb.path} ${ch.channel}`;
+        this._channel = ch;
+        this._stream = new stream.PassThrough();
+        this._stream.on("data", this._streamOnData.bind(this));
+        this._streamUsesMMTSDecoder = false;
+        this._remoteDecode = null;
+        this._remoteOutputFormat = undefined;
+        this._lastDataAt = 0;
+        this._spawnedAt = Date.now();
+        this._commandFailed = false;
+        this._updated();
+
+        const generation = ++this._dvbGeneration;
+        let channels: DvbChannels;
+        try {
+            channels = await readChannelsConf(this._dvbChannelsConfPath);
+        } catch (err) {
+            if (generation !== this._dvbGeneration) { return; }
+            log.warn("TunerDevice#%d cannot read DVB channel configuration; using command mode (%s)", this._index, err.message);
+            this._dvbActive = false;
+            this._stream?.removeAllListeners();
+            this._stream = null;
+            this._command = null;
+            this._channel = null;
+            await this._dvb.close().catch(log.error);
+            this._dvb = null;
+            this._dvbPromise = null;
+            this._forceCommand = true;
+            try {
+                this._spawn(ch, disableMMTSDecoder, options, outputFormat, disableDecoder);
+            } finally {
+                this._forceCommand = false;
+            }
+            return;
+        }
+
+        if (generation !== this._dvbGeneration) { return; }
+        try {
+            await this._dvb.start(findChannelParams(
+                channels,
+                ch.channel,
+                this._dvbChannelsConfPath,
+                this._dvbChannelByFrequency
+            ));
+            this._fatalCount = 0;
+        } catch (err) {
+            if (generation === this._dvbGeneration) {
+                if (err.syscall === "open" && DVB_MISSING_DEVICE_ERRORS.includes(err.code)) {
+                    ++this._fatalCount;
+                    if (this._fatalCount >= 3) {
+                        log.fatal("TunerDevice#%d has something fault! **RESTART REQUIRED** after fix it.", this._index);
+                        this._isFault = true;
+                    }
+                } else {
+                    this._fatalCount = 0;
+                }
+            }
+            throw err;
+        }
+        if (generation === this._dvbGeneration) {
+            log.info("TunerDevice#%d tuned DVB device %s to channel %s in %dms",
+                this._index, this._dvb.path, ch.channel, Date.now() - this._spawnedAt);
+        }
     }
 
     private _streamOnData(chunk: Buffer): void {
@@ -871,7 +1032,7 @@ export default class TunerDevice extends EventEmitter {
     }
 
     private _startSourceWatchdog(): void {
-        if (this._sourceWatchdog || !this._process) { return; }
+        if (this._sourceWatchdog || (!this._process && !this._dvbActive)) { return; }
         this._sourceWatchdog = setInterval(() => {
             if (this._closing || this._users.size === 0 ||
                 Date.now() - Math.max(this._lastDataAt, this._spawnedAt) < STREAM_START_TIMEOUT_MS) { return; }
@@ -921,10 +1082,27 @@ export default class TunerDevice extends EventEmitter {
         this._updated();
     }
 
+    private _dvbOnError(err: Error): void {
+        if (this._dvbActive === false || this._closing === true) { return; }
+        log.error("TunerDevice#%d DVB device error (%s)", this._index, err.message);
+        this._commandFailed = true;
+        const generation = ++this._dvbGeneration;
+        this._isAvailable = false;
+        this._dvbActive = false;
+        this._updated();
+        this._dvb?.close().catch(log.error).then(() => {
+            if (generation !== this._dvbGeneration) { return; }
+            this._end();
+            setTimeout(() => {
+                if (generation === this._dvbGeneration) { this._release(); }
+            }, DVB_RESPAWN_DELAY);
+        });
+    }
+
     private async _kill(close: boolean): Promise<void> {
         log.debug("TunerDevice#%d kill...", this._index);
 
-        if (!this._process || !this._process.pid) {
+        if (this._dvbActive === false && (!this._process || !this._process.pid)) {
             throw new Error(util.format("TunerDevice#%d has not process", this._index));
         } else if (this._closing) {
             log.debug("TunerDevice#%d return because it is closing", this._index);
@@ -939,6 +1117,14 @@ export default class TunerDevice extends EventEmitter {
         }
 
         this._updated();
+
+        if (this._dvbActive) {
+            ++this._dvbGeneration;
+            await this._dvb.stopStream().catch(log.error);
+            this._end();
+            this._release();
+            return;
+        }
 
         await new Promise<void>(resolve => {
             this.once("release", resolve);
@@ -970,10 +1156,28 @@ export default class TunerDevice extends EventEmitter {
         }
         this._closeMMTSDecoder();
 
-        if (this._config.dvbAutoDiscovery === true) { this._dvbPool?.release(this._index); }
+        const dvbReleased = this._dvbActive;
         this._command = null;
         this._process = null;
         this._stream = null;
+        this._dvbActive = false;
+
+        if (this._dvb !== null && this._dvb.isOpen) {
+            clearTimeout(this._dvbCloseTimer);
+            const generation = this._dvbGeneration;
+            this._dvbCloseTimer = setTimeout(() => {
+                this._dvbCloseTimer = null;
+                if (this._dvbActive === false && generation === this._dvbGeneration) {
+                    this._dvb.close().catch(log.error).finally(() => {
+                        if (this._config.dvbAutoDiscovery === true && generation === this._dvbGeneration && this._dvbActive === false) {
+                            this._dvbPool?.release(this._index);
+                        }
+                    });
+                }
+            }, DVB_CLOSE_DELAY);
+        } else if (this._config.dvbAutoDiscovery === true) {
+            this._dvbPool?.release(this._index);
+        }
 
         if (this._closing === false && this._users.size !== 0) {
             if (this._commandFailed === true || this._isRemote === true || this._lastDataAt === 0) {
@@ -1002,7 +1206,7 @@ export default class TunerDevice extends EventEmitter {
             }
         }
 
-        this._fatalCount = 0;
+        if (dvbReleased === false) { this._fatalCount = 0; }
         this._channel = null;
         this._users.clear();
         this._streamUsesMMTSDecoder = false;

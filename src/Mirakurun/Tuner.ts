@@ -492,6 +492,11 @@ export class Tuner {
                 return;
             }
 
+            if (tuner.disableDvbDirect !== undefined && typeof tuner.disableDvbDirect !== "boolean") {
+                log.error("invalid type of property `disableDvbDirect` in tuner#%s configuration", i);
+                return;
+            }
+
             if (tuner.dvbDevicePath && typeof tuner.dvbDevicePath !== "string") {
                 log.error("invalid type of property `dvbDevicePath` in tuner#%s configuration", i);
                 return;

@@ -402,6 +402,17 @@ export const TunersConfigView: React.FC = () => {
                                                         }}
                                                     />
                                                 </FormGroup>
+                                                <Checkbox
+                                                    label="Disable DVB Direct"
+                                                    checked={tuner.disableDvbDirect === true}
+                                                    onChange={(e) => {
+                                                        if (e.currentTarget.checked) {
+                                                            updateTuner(i, { disableDvbDirect: true });
+                                                        } else {
+                                                            deleteTunerProperty(i, "disableDvbDirect");
+                                                        }
+                                                    }}
+                                                />
                                             </>
                                         )}
                                         {!tuner.command && (

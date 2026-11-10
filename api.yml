@@ -466,6 +466,7 @@ definitions:
         type: string
       pid:
         type: integer
+        x-nullable: true
       users:
         type: array
         items:
@@ -574,6 +575,7 @@ definitions:
     properties:
       pid:
         type: integer
+        x-nullable: true
 
   # job -----------------------------------------------------------------------
 
@@ -851,6 +853,9 @@ definitions:
       dvbFrontendPath:
         type: string
         description: Optional /dev/dvb/adapterN/frontendM pin. Empty selects a compatible free frontend.
+      disableDvbDirect:
+        type: boolean
+        description: Run dvbv5-zap as a process instead of tuning the DVB device directly.
       dvbDevicePath:
         type: string
       checkDevicePath:
